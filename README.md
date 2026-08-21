@@ -271,6 +271,17 @@ corepack pnpm pack
 
 `npm pack --dry-run --json` is useful for reviewing the files that will be published before creating a release archive.
 
+### CI and npm releases
+
+GitHub Actions runs the full build and test suite for pull requests targeting `main` and for every push to `main`.
+
+Tag pushes matching `vMAJOR.MINOR.PATCH` or `vMAJOR.MINOR.PATCH-prerelease` test and publish the package to npm. The tag version must exactly match `package.json.version`:
+
+- `package.json.version` `0.4.0-rc1` with tag `v0.4.0-rc1` publishes with the npm `next` dist-tag.
+- `package.json.version` `0.4.0` with tag `v0.4.0` publishes with the npm `latest` dist-tag.
+
+Before enabling release publishing, add a GitHub Actions repository secret named `NPM_TOKEN`. The token's npm account must be allowed to create or publish the public, unscoped `dsh-synapse` package.
+
 ## License
 
 [MIT](LICENSE)
