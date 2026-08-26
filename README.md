@@ -1,62 +1,68 @@
-# dsh-synapse
+<h1 align="center">dsh-synapse</h1>
 
-![version](https://img.shields.io/badge/version-0.3.0-3478f6?style=flat-square)
-![license](https://img.shields.io/badge/license-MIT-10b981?style=flat-square)
-![platform](https://img.shields.io/badge/platform-web-7c3aed?style=flat-square)
-![node](https://img.shields.io/badge/node-%3E%3D22.19-334155?style=flat-square)
+<p align="center">DeepSeek Harness 的可视化对话工作台</p>
 
-**A visual, non-linear conversation workspace plugin for DeepSeek Harness.**
+<p align="center">
+  <a href="https://www.npmjs.com/package/dsh-synapse"><img src="https://img.shields.io/npm/v/dsh-synapse?style=flat-square&logo=npm&label=npm" alt="npm version"></a>
+  <a href="https://github.com/liangmianya/dsh-synapse/actions/workflows/main-tests.yml"><img src="https://github.com/liangmianya/dsh-synapse/actions/workflows/main-tests.yml/badge.svg?branch=main&style=flat-square" alt="Main branch tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-10b981?style=flat-square" alt="MIT license"></a>
+  <a href="package.json"><img src="https://img.shields.io/node/v/dsh-synapse?style=flat-square&logo=node.js&label=node" alt="Node.js version"></a>
+</p>
 
-把同一工作区中的会话、追问和分支组织成可浏览、可拖拽、可缩放的对话地图，同时保留 DSH 原生的会话能力。
+<p align="center">
+  <a href="docs/zh-CN/README.md">中文指南</a> ·
+  <a href="docs/en/README.md">English guide</a> ·
+  <a href="https://www.npmjs.com/package/dsh-synapse">npm</a> ·
+  <a href="docs/development.md">开发与发布</a>
+</p>
 
-[中文指南](docs/zh-CN/README.md) · [English guide](docs/en/README.md) · [Development](docs/development.md) · [Architecture](docs/architecture.md)
+把同一工作区中的会话、追问和分支组织成一张可浏览、可拖拽、可缩放的地图，同时保留 DSH 原生会话作为唯一事实来源。
 
-![Synapse workspace canvas](docs/images/synapse-ui.png)
+![Synapse 会话地图：链条、分支与追问卡片](docs/images/synapse-ui.png)
 
-## Overview
+## 快速安装
 
-`dsh-synapse` adds a visual session map to the native DeepSeek Harness Web interface. It projects committed DSH conversations into connected cards, keeps forks attached to their real branching turns, and synchronizes the current session between the map and native chat.
-
-Synapse is an interface layer, not a second conversation system. DSH continues to own sessions, model requests, tools, permissions, and the Web server.
-
-## Features
-
-| | Feature | 功能 |
-|---|---|---|
-| 🗺️ | Browse sessions and turns as a connected canvas | 将会话和追问显示为连线画布 |
-| 🌿 | Preserve native DSH fork lineage | 按真实分叉点显示 DSH 分支 |
-| 📁 | Group sessions by DSH workspace and directory | 按工作区和目录组织会话 |
-| 📥 | Project committed and streaming replies into cards | 将已提交和流式回复投影到卡片 |
-| 🔧 | Fold tool calls and results into assistant replies | 将工具调用和结果折叠到助手回答 |
-| ⚡ | Synchronize the active session with native chat | 与 DSH 原生对话双向同步当前会话 |
-| 🎨 | Pan, zoom, drag, fold descendant subtrees, focus, and persist card positions | 支持平移、缩放、拖动、展开/折叠后续子树、定位和位置保存 |
-
-![Native dialogue and Synapse toggle](docs/images/native-webui.png)
-
-## Quick start
-
-Requirements: DeepSeek Harness with the profile plugin mechanism, Node.js `>= 22.19.0`, and the `web` profile.
+需要支持 profile 插件机制的 DeepSeek Harness、Node.js `>= 22.19.0`，以及 `web` profile。
 
 ```powershell
 corepack pnpm dsh plugin --profile web add dsh-synapse
 corepack pnpm dsh web
 ```
 
-Open `http://127.0.0.1:3080/` and select **Session Map / 会话地图** from the top switch.
+启动后，在 DSH 顶部切换到 **会话地图**。Synapse 复用现有的 DSH Web Server，不会启动第二个应用或代理系统。
 
-> [!NOTE]
-> Synapse extends the existing DSH Web profile. It does not start a second application server. The npm package needs no build permission; Git and local-checkout installs are documented in the installation guide.
+## 它解决什么问题
 
-## Documentation
-
-| Document | Description |
+| 能力 | 说明 |
 |---|---|
-| [中文指南](docs/zh-CN/README.md) | 安装、启动、配置、使用、卸载和已知限制 |
-| [English guide](docs/en/README.md) | Installation, configuration, usage, cleanup, and limitations |
-| [Development and releases](docs/development.md) | Local validation, GitHub Actions, version tags, and npm publishing |
-| [Architecture and boundaries](docs/architecture.md) | Session ownership, projection, storage, model impact, and operational limits |
+| 对话地图 | 把连续追问、分支和不同会话放到同一张可操作的画布上。 |
+| 保留真实分支 | 按 DSH 原生 fork 关系连接卡片，不制造另一套会话历史。 |
+| 追问更顺手 | 选中回答中的文字可直接带入新的追问；常用补充词可编辑。 |
+| 双向同步 | 在地图或 DSH 原生对话中切换会话，当前上下文保持一致。 |
 
-## Development
+## 查看一张卡片
+
+卡片可以展开完整上下文、继续追问或创建分支。中间链条节点只提供分支入口，避免在历史位置继续追问造成歧义。
+
+![Synapse 详情视图：完整上下文、分支和继续追问](docs/images/synapse-detail.png)
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [中文指南](docs/zh-CN/README.md) | 安装、启动、配置、使用、卸载和限制。 |
+| [English guide](docs/en/README.md) | Installation, configuration, usage, cleanup, and limitations. |
+| [开发与发布](docs/development.md) | 本地验证、GitHub Actions、版本标签和 npm 发布。 |
+| [架构与边界](docs/architecture.md) | 会话归属、投影、数据存储和模型影响。 |
+
+## 与 DSH 的边界
+
+- DSH session log 保存真实会话内容；Synapse 只投影已提交的事件。
+- Synapse 的画布布局数据保存在 `$DSH_HOME/synapse/`，删除它不会删除 DSH 会话。
+- 插件不修改 prompt、模型请求、工具 schema、provider 路由或可复用 KV-cache 前缀。
+- 内置 patch 仅支持 DSH 的 `web` profile。
+
+## 开发
 
 ```powershell
 corepack pnpm install --frozen-lockfile
@@ -64,18 +70,8 @@ corepack pnpm run build
 corepack pnpm test
 ```
 
-See the [development and release guide](docs/development.md) for CI/CD and npm publication details.
+完整的贡献、CI/CD 和发布流程见[开发与发布指南](docs/development.md)。
 
-## Runtime boundaries
-
-- DSH session logs remain the source of truth for conversation content.
-- Synapse stores canvas metadata separately under `$DSH_HOME/synapse/`.
-- Projected card text is capped at 8000 characters; the full message remains available in conversation details.
-- The plugin does not modify prompts, model requests, tool schemas, provider routing, or reusable KV-cache prefixes.
-- Only the DSH `web` profile is supported by the bundled patch.
-
-See [Architecture and runtime boundaries](docs/architecture.md) for the complete model.
-
-## License
+## 许可证
 
 [MIT](LICENSE)
