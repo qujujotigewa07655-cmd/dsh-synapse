@@ -453,7 +453,7 @@ function markdownBlock(text) {
 // rebuild; cache the rendered HTML by input text so stable answers are never
 // re-parsed. Bounded: streaming partial texts churn keys, so evict oldest.
 const markdownCache = new Map()
-const MARKDOWN_CACHE_LIMIT = 500
+const MARKDOWN_CACHE_LIMIT = 5000
 function renderMarkdown(text) {
   const key = String(text)
   const cached = markdownCache.get(key)
@@ -504,11 +504,31 @@ function selectorValue(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
-function refreshCardConnectors(cardId) {
+// Connector paths are rebuilt together with the canvas DOM; cache the mapping
+// from card id to its incident paths so dragging never scans the whole SVG.
+let connectorPathsByCard = new Map()
+function cacheCardConnectors() {
+  connectorPathsByCard = new Map()
   const viewport = document.querySelector('.canvas-viewport')
   if (!(viewport instanceof HTMLElement)) return
-  const id = selectorValue(cardId)
-  for (const path of viewport.querySelectorAll(`.connectors path[data-from="${id}"], .connectors path[data-to="${id}"]`)) {
+  for (const path of viewport.querySelectorAll('.connectors path[data-from]')) {
+    const fromId = path.getAttribute('data-from')
+    const toId = path.getAttribute('data-to')
+    if (fromId === null || toId === null) continue
+    for (const id of [fromId, toId]) {
+      const paths = connectorPathsByCard.get(id)
+      if (paths === undefined) connectorPathsByCard.set(id, new Set([path]))
+      else paths.add(path)
+    }
+  }
+}
+
+function refreshCardConnectors(cardId) {
+  const paths = connectorPathsByCard.get(cardId)
+  if (paths === undefined || paths.size === 0) return
+  const viewport = document.querySelector('.canvas-viewport')
+  if (!(viewport instanceof HTMLElement)) return
+  for (const path of paths) {
     const fromId = path.getAttribute('data-from')
     const toId = path.getAttribute('data-to')
     if (fromId === null || toId === null) continue
@@ -704,17 +724,60 @@ function conversationGraphView(cards, collapsedCardIds = state.collapsedCardIds)
   // contains a cycle where two collapsed nodes otherwise hide each other.
   for (const rootId of collapsedCardIds) hiddenIds.delete(rootId)
 
+  // Post-order accumulation: each card's descendant count is 1 + the sum of
+  // its children's subtree sizes, so the whole graph is O(n) instead of a BFS
+  // from every card (O(n²) on deep chains). Malformed parent cycles are
+  // detected through the DFS path: every member of a cycle reaches every other
+  // member plus the union of their off-cycle subtrees, so when the cycle entry
+  // pops last, all members are settled to (cycleSize - 1) + off-cycle total,
+  // which matches the per-card BFS' unique-descendant count.
   const descendantCounts = new Map()
+  const inStack = new Set()
   for (const card of cards) {
-    const visited = new Set([card.id])
-    const pending = [...(childrenByParent.get(card.id) ?? [])]
-    while (pending.length > 0) {
-      const descendantId = pending.pop()
-      if (visited.has(descendantId)) continue
-      visited.add(descendantId)
-      pending.push(...(childrenByParent.get(descendantId) ?? []))
+    if (descendantCounts.has(card.id)) continue
+    const stack = [{ id: card.id, children: childrenByParent.get(card.id) ?? [], index: 0 }]
+    const path = [card.id]
+    let cycleEntry = null
+    let cycleMembers = null
+    let cycleOffCycleTotal = 0
+    inStack.add(card.id)
+    while (stack.length > 0) {
+      const top = stack[stack.length - 1]
+      if (top.index < top.children.length) {
+        const childId = top.children[top.index++]
+        if (descendantCounts.has(childId)) continue
+        if (inStack.has(childId)) {
+          // Back edge: the nodes from childId up to top.id form a cycle.
+          cycleEntry = childId
+          cycleMembers = new Set(path.slice(path.indexOf(childId)))
+          cycleOffCycleTotal = 0
+          continue
+        }
+        inStack.add(childId)
+        path.push(childId)
+        stack.push({ id: childId, children: childrenByParent.get(childId) ?? [], index: 0 })
+      } else {
+        stack.pop()
+        path.pop()
+        inStack.delete(top.id)
+        let count = 0
+        for (const childId of top.children) {
+          if (cycleMembers !== null && cycleMembers.has(childId)) continue // ring edge; base count added below
+          count += 1 + (descendantCounts.get(childId) ?? 0)
+        }
+        if (cycleMembers !== null && cycleMembers.has(top.id)) cycleOffCycleTotal += count
+        if (cycleMembers !== null && top.id === cycleEntry) {
+          // All cycle members have popped (the entry pops last in post-order);
+          // settle them so ancestors popping next read the final counts.
+          const base = cycleMembers.size - 1
+          for (const id of cycleMembers) descendantCounts.set(id, base + cycleOffCycleTotal)
+          cycleEntry = null
+          cycleMembers = null
+        } else {
+          descendantCounts.set(top.id, count)
+        }
+      }
     }
-    descendantCounts.set(card.id, visited.size - 1)
   }
 
   return {
@@ -871,8 +934,11 @@ function render() {
   const cardScrollTops = new Map()
   if (state.mode === 'canvas') {
     // Key by the unique card id: every card of a session shares data-thread,
-    // so keying on it would clobber sibling cards' scroll positions.
+    // so keying on it would clobber sibling cards' scroll positions. Only
+    // scrollable answers have a position worth preserving; reading the two
+    // height properties shares the same forced layout as the scrollTop read.
     for (const answer of document.querySelectorAll('.thread-card[data-thread] .thread-answer')) {
+      if (answer.scrollHeight <= answer.clientHeight) continue
       const card = answer.closest('.thread-card')
       if (card instanceof HTMLElement && typeof card.dataset.cardId === 'string') cardScrollTops.set(card.dataset.cardId, answer.scrollTop)
     }
@@ -887,6 +953,7 @@ function render() {
   const canvasTabs = `<nav class="canvas-tabs" aria-label="会话地图视图"><button class="${state.mode === 'canvas' ? 'active' : ''}" data-action="show-canvas">地图</button><button class="${state.mode === 'thread' ? 'active' : ''}" data-action="show-thread" data-thread="${state.activeId ?? ''}" ${detailAvailable ? '' : 'disabled'}>详情</button></nav>`
   app.innerHTML = `<main class="synapse-shell ${state.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside class="sidebar"><div class="sidebar-brand-row"><div class="brand" aria-label="Synapse"><svg class="brand-mark" aria-hidden="true" viewBox="0 0 32 32" fill="none"><path d="M9 10.5 16 7l7 3.5M9 10.5v8L16 22m0-15v15m7-11.5v8L16 22"/><circle cx="9" cy="10" r="2.5"/><circle cx="23" cy="10" r="2.5"/><circle cx="16" cy="23" r="2.5"/></svg><strong>Synapse</strong></div><button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}" title="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2.25"/><path d="M6 2v12"/></svg></button></div><button class="new-workspace" type="button" data-action="create-session" ${state.draft !== null ? 'disabled' : ''}><svg class="new-session-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.75v6.5M4.75 8h6.5"/></svg><span>新会话</span></button><label class="workspace-label"><span>工作区</span><span class="workspace-select"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 4.75h3l1.2 1.5h6.8v5.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/></svg><select data-action="select-workspace" aria-label="选择工作区" ${state.draft !== null ? 'disabled' : ''}>${choices.map(item => `<option value="${item.id}" title="${escapeHtml(item.path ?? item.title)}" ${item.id === selectedWorkspaceId ? 'selected' : ''}>${escapeHtml(item.title)}</option>`).join('')}</select></span></label><div class="sidebar-heading"><span>会话</span></div><nav class="thread-tree">${threads.map(thread => `<button class="tree-row ${thread.id === state.activeId ? 'active' : ''}" data-action="select-thread" data-thread="${thread.id}" style="--thread-color:#374151"><span class="tree-dot"></span><span>${escapeHtml(threadListTitle(thread))}</span>${thread.parentId === null ? '' : '<i>分支</i>'}</button>`).join('') || '<p class="tree-empty">暂未同步会话</p>'}</nav></aside><header class="topbar"><div class="view-switch" role="group" aria-label="视图切换"><button data-action="close" type="button" aria-pressed="false">对话</button><button class="active" type="button" aria-pressed="true">会话地图</button></div>${canvasControls}</header><section class="main-stage">${state.error ? `<div class="status-message" role="alert"><span>${escapeHtml(state.error)}</span><button data-action="dismiss-error" aria-label="关闭" title="关闭">×</button></div>` : ''}${canvasTabs}${view}</section></main>`
   installDragging()
+  cacheCardConnectors()
   for (const [cardId, scrollTop] of cardScrollTops) {
     const answer = app.querySelector(`.thread-card[data-card-id="${CSS.escape(cardId)}"] .thread-answer`)
     if (answer instanceof HTMLElement) answer.scrollTop = scrollTop
@@ -916,14 +983,21 @@ function installDragging() {
     const aliases = card.dataset.positionKey === undefined ? [] : [card.dataset.positionKey]
     let position = origin.position
     let stopped = false
+    let frame = 0
     state.dragging = true
-    const move = moveEvent => {
-      position = { x: origin.position.x + (moveEvent.clientX - origin.x) / state.zoom, y: origin.position.y + (moveEvent.clientY - origin.y) / state.zoom }
+    // Coalesce pointermove updates to one DOM pass per animation frame so a
+    // high report-rate pointer cannot queue a reflow per event.
+    const apply = () => {
+      frame = 0
       state.cardPositions.set(cardId, { x: Math.round(position.x), y: Math.round(position.y) })
       for (const alias of aliases) state.cardPositions.set(alias, { x: Math.round(position.x), y: Math.round(position.y) })
       card.style.left = `${position.x}px`
       card.style.top = `${position.y}px`
       refreshCardConnectors(cardId)
+    }
+    const move = moveEvent => {
+      position = { x: origin.position.x + (moveEvent.clientX - origin.x) / state.zoom, y: origin.position.y + (moveEvent.clientY - origin.y) / state.zoom }
+      if (frame === 0) frame = window.requestAnimationFrame(apply)
     }
     const stop = () => {
       if (stopped) return
@@ -931,10 +1005,13 @@ function installDragging() {
       document.removeEventListener('pointermove', move)
       document.removeEventListener('pointerup', stop)
       document.removeEventListener('pointercancel', stop)
+      if (frame !== 0) { window.cancelAnimationFrame(frame); frame = 0 }
+      apply()
       rememberCardPosition(cardId, position, aliases)
       state.dragging = false
       deferCanvasRefresh(120)
-      render()
+      // No full render: only the dragged card's inline position and its
+      // connectors changed; rebuilding the whole canvas on drop is the jank.
     }
     document.addEventListener('pointermove', move)
     document.addEventListener('pointerup', stop)
@@ -956,7 +1033,17 @@ function zoomCanvas(viewport, nextZoom, clientX, clientY) {
   const worldY = (localY - state.canvasCamera.y) / state.zoom
   state.zoom = zoom
   state.canvasCamera = { x: localX - worldX * zoom, y: localY - worldY * zoom }
-  applyCanvasTransform()
+  const content = viewport.querySelector('.canvas-content')
+  if (content instanceof HTMLElement) {
+    // Drop the composited layer before zooming: a cached will-change raster
+    // would be upscaled instead of re-rasterized, which was the original
+    // zoom-blur bug. will-change re-applies via .is-panning on the next pan.
+    content.style.willChange = 'auto'
+    applyCanvasTransform()
+    window.requestAnimationFrame(() => { content.style.willChange = '' })
+  } else {
+    applyCanvasTransform()
+  }
   const label = document.querySelector('.canvas-controls span')
   if (label !== null) label.textContent = `${Math.round(state.zoom * 100)}%`
 }
@@ -988,21 +1075,32 @@ app.addEventListener('pointerdown', event => {
   if (!(viewport instanceof HTMLElement) || event.target instanceof Element && event.target.closest('.thread-card, button, textarea, select')) return
   event.preventDefault()
   const origin = { x: event.clientX, y: event.clientY, camera: { ...state.canvasCamera } }
+  let pendingCamera = null
+  let frame = 0
   state.canvasGesture = true
   viewport.classList.add('is-panning')
   viewport.setPointerCapture(event.pointerId)
+  const apply = () => {
+    frame = 0
+    if (pendingCamera === null) return
+    state.canvasCamera = pendingCamera
+    pendingCamera = null
+    applyCanvasTransform()
+  }
   const move = moveEvent => {
-    state.canvasCamera = {
+    pendingCamera = {
       x: origin.camera.x + moveEvent.clientX - origin.x,
       y: origin.camera.y + moveEvent.clientY - origin.y,
     }
-    applyCanvasTransform()
+    if (frame === 0) frame = window.requestAnimationFrame(apply)
   }
   const stop = () => {
     viewport.classList.remove('is-panning')
     document.removeEventListener('pointermove', move)
     document.removeEventListener('pointerup', stop)
     document.removeEventListener('pointercancel', stop)
+    if (frame !== 0) { window.cancelAnimationFrame(frame); frame = 0 }
+    apply()
     state.canvasGesture = false
     deferCanvasRefresh(120)
   }
@@ -1221,6 +1319,9 @@ function scheduleLiveCardUpdate(sessionId) {
 }
 function applyLiveReplyToCard(sessionId) {
   if (state.mode !== 'canvas') return
+  // Never patch cards mid-gesture: the reflow would compete with the drag or
+  // pan frame; the next live-reply chunk re-applies after the gesture ends.
+  if (state.dragging || state.canvasGesture) return
   const thread = state.workspace?.threads.find(item => item.dshSessionId === sessionId)
   if (thread === undefined) return
   const live = state.liveReplies.get(sessionId)
