@@ -36,6 +36,21 @@ test('projects each user question in one DSH session as a connected canvas card'
   assert.equal(cards[1].canContinue, true)
 })
 
+test('keeps a failed turn visible when Harness produces no assistant message', async () => {
+  const { conversationCards } = await loadConversationCards()
+  const [card] = conversationCards([{
+    id: 'session-error', parentId: null, position: { x: 86, y: 82 },
+    messages: [
+      { kind: 'user', text: '调用搜索', sourceSeq: 1 },
+      { kind: 'error', text: 'QuotaExceeded: INSUFFICIENT_BALANCE: 余额不足', sourceSeq: 2 },
+    ],
+  }])
+
+  assert.equal(card.answer, null)
+  assert.equal(card.error.text, 'QuotaExceeded: INSUFFICIENT_BALANCE: 余额不足')
+  assert.equal(card.canContinue, true)
+})
+
 test('connects a restored fork to its DSH seed boundary, not its canvas position', async () => {
   const { conversationCards } = await loadConversationCards()
   const cards = conversationCards([

@@ -3,6 +3,26 @@ if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 const LEGACY_CARD_POSITIONS_KEY = 'dsh-synapse:card-positions'
 const CARD_POSITIONS_KEY = 'dsh-synapse:card-positions:v3'
 const COLLAPSED_CARDS_KEY = 'dsh-synapse:collapsed-cards:v1'
+const QUICK_PHRASES_KEY = 'dsh-synapse:quick-phrases:v1'
+const DEFAULT_QUICK_PHRASES = ['展开说明', '举例', '通俗易懂', '对比解释']
+const MAX_QUICK_PHRASES = 12
+const MAX_QUICK_PHRASE_LENGTH = 16
+function normalizeQuickPhrases(value) {
+  if (!Array.isArray(value)) return []
+  const phrases = []
+  for (const item of value) {
+    const phrase = typeof item === 'string' ? item.trim().slice(0, MAX_QUICK_PHRASE_LENGTH) : ''
+    if (phrase !== '' && !phrases.includes(phrase)) phrases.push(phrase)
+    if (phrases.length === MAX_QUICK_PHRASES) break
+  }
+  return phrases
+}
+const savedQuickPhrases = (() => {
+  try {
+    const stored = localStorage.getItem(QUICK_PHRASES_KEY)
+    return stored === null ? DEFAULT_QUICK_PHRASES : normalizeQuickPhrases(JSON.parse(stored))
+  } catch { return DEFAULT_QUICK_PHRASES }
+})()
 const savedBranchAnchors = (() => {
   try {
     const value = JSON.parse(localStorage.getItem('dsh-synapse:branch-anchors') ?? '[]')
@@ -34,14 +54,15 @@ const CAMERA_INSET_Y = 56
 // so panning never flashes empty space.
 const VIEWPORT_MARGIN = 1400
 const state = {
-  summaries: [], workspace: null, activeId: null, mode: 'canvas', zoom: 1, currentDsh: null, sidebarCollapsed: false,
+  summaries: [], workspace: null, activeId: null, selectedCardId: null, mode: 'canvas', zoom: 1, currentDsh: null, sidebarCollapsed: false,
   dshWorkspaces: [], selectedDshWorkspaceId: null,
   historyBySession: new Map(), historyRequests: new Map(), pendingReplies: new Map(), pendingRpc: new Map(), liveReplies: new Map(),
-  draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards),
-  dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
+  draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards), quickPhrases: savedQuickPhrases, quickPhraseEditorOpen: false,
+  dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 }, mapCardSessionSwitches: new Set(),
   expandedMessageIds: new Set(),
   canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(), canvasNeedsCenter: false,
   detailScrollByThread: new Map(), detailThreadId: null, detailTargetCardId: null,
+  inspectorCardId: null, inspectorOpening: false, inspectorScrollByCard: new Map(),
 }
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
@@ -60,6 +81,10 @@ function persistCardPositions() {
 
 function persistCollapsedCards() {
   try { localStorage.setItem(COLLAPSED_CARDS_KEY, JSON.stringify([...state.collapsedCardIds])) } catch { /* Private browsing may disable local storage. */ }
+}
+
+function persistQuickPhrases() {
+  try { localStorage.setItem(QUICK_PHRASES_KEY, JSON.stringify(state.quickPhrases)) } catch { /* Private browsing may disable local storage. */ }
 }
 
 function rememberCardPosition(cardId, position, aliases = []) {
@@ -164,7 +189,7 @@ async function threadsForDshWorkspace(workspace) {
   return projections.flatMap(projection => projection.workspace.threads.filter(thread => requested.has(thread.dshSessionId)))
 }
 
-async function openDshWorkspace(id, { renderAfter = true } = {}) {
+async function openDshWorkspace(id, { renderAfter = true, preserveCanvasCamera = false } = {}) {
   const workspace = state.dshWorkspaces.find(item => item.id === id)
   if (workspace === undefined) return false
   const load = ++state.workspaceLoad
@@ -172,7 +197,7 @@ async function openDshWorkspace(id, { renderAfter = true } = {}) {
   const threads = await threadsForDshWorkspace(workspace)
   if (load !== state.workspaceLoad) return true
   const nextWorkspaceId = `dsh:${workspace.id}`
-  if (state.workspace?.id !== nextWorkspaceId) resetCanvasCamera()
+  if (state.workspace?.id !== nextWorkspaceId && !preserveCanvasCamera) resetCanvasCamera()
   state.workspace = { id: nextWorkspaceId, title: workspace.title, cwd: workspace.path, threads }
   const currentThread = currentDshThread(state.workspace.threads)
   state.activeId = currentThread?.id ?? (state.workspace.threads.some(thread => thread.id === state.activeId) ? state.activeId : state.workspace.threads[0]?.id ?? null)
@@ -183,10 +208,10 @@ async function openDshWorkspace(id, { renderAfter = true } = {}) {
   return true
 }
 
-async function openCurrentWorkspace() {
+async function openCurrentWorkspace({ preserveCanvasCamera = false } = {}) {
   const workspace = currentDshWorkspace()
   if (workspace === undefined || workspace.id === state.selectedDshWorkspaceId) return false
-  return openDshWorkspace(workspace.id)
+  return openDshWorkspace(workspace.id, { preserveCanvasCamera })
 }
 
 async function refreshSummaries({ renderAfter = true } = {}) {
@@ -227,6 +252,10 @@ function openNewSession() {
   if (state.draft !== null) return
   state.mode = 'canvas'
   state.activeId = null
+  state.selectedCardId = null
+  state.inspectorCardId = null
+  state.inspectorOpening = false
+  state.quickPhraseEditorOpen = false
   state.draft = { kind: 'new', text: '', sending: false }
   state.error = ''
   resetCanvasCamera()
@@ -273,17 +302,26 @@ async function archiveThread(thread) {
   await refreshSummaries()
 }
 
-function openContinue(parent, anchorId = undefined) {
+function focusDraftInput() {
+  const input = document.querySelector('[data-draft] textarea')
+  if (!(input instanceof HTMLTextAreaElement)) return
+  input.focus()
+  input.setSelectionRange(input.value.length, input.value.length)
+}
+
+function openContinue(parent, anchorId = undefined, text = '') {
   if (parent.dshSessionId === null) return setError('该节点没有关联的 DSH 会话')
   state.activeId = parent.id
-  state.draft = { kind: 'continue', parentId: parent.id, anchorId, text: '', sending: false }
+  state.quickPhraseEditorOpen = false
+  state.draft = { kind: 'continue', parentId: parent.id, anchorId, text, sending: false }
   render()
-  window.setTimeout(() => document.querySelector('[data-draft] textarea')?.focus(), 0)
+  window.setTimeout(focusDraftInput, 0)
 }
 
 function openBranch(parent, atSeq = undefined, anchorId = undefined) {
   if (parent.dshSessionId === null) return setError('该节点没有关联的 DSH 会话')
   state.activeId = parent.id
+  state.quickPhraseEditorOpen = false
   state.draft = { kind: 'branch', parentId: parent.id, atSeq, anchorId, text: '', sending: false }
   render()
   window.setTimeout(() => document.querySelector('[data-draft] textarea')?.focus(), 0)
@@ -630,12 +668,18 @@ function conversationCards(threads) {
       const question = messages[messageIndex]
       if (question.kind !== 'user') continue
       const replies = []
+      const errors = []
+      let processCount = 0
       for (let replyIndex = messageIndex + 1; replyIndex < messages.length; replyIndex++) {
         const reply = messages[replyIndex]
         if (reply.kind === 'user') break
         if (reply.kind === 'assistant') replies.push(reply)
+        if (reply.kind === 'error') errors.push(reply)
+        if (Array.isArray(reply.process)) processCount += reply.process.length
+        else if (reply.kind === 'tool') processCount += 1
       }
       const answer = replies.at(-1) ?? null
+      const error = errors.at(-1) ?? null
       const turnIndex = turns.length
       const id = `${thread.id}:turn:${question.sourceSeq ?? messageIndex}`
       const previous = turns.at(-1)
@@ -657,6 +701,8 @@ function conversationCards(threads) {
         positionLocked,
         question: question.text,
         answer,
+        error,
+        processCount,
       })
     }
     const liveReply = state.liveReplies.get(thread.dshSessionId)
@@ -681,6 +727,8 @@ function conversationCards(threads) {
       positionLocked,
       question: thread.dshSessionTitle ?? thread.title,
       answer: null,
+      error: null,
+      processCount: 0,
       })
     }
     turns.at(-1).canContinue = true
@@ -819,7 +867,8 @@ function canvasConnectors(cards) {
   const links = cards.map(card => {
     const parent = card.parentId === null ? null : index.get(card.parentId)
     if (parent === undefined || parent === null) return ''
-    return `<path data-from="${escapeHtml(parent.id)}" data-to="${escapeHtml(card.id)}" d="${connectorPath(parent.position, card.position)}"></path>`
+    const active = card.dshThreadId === state.activeId && parent.dshThreadId === state.activeId ? ' active-connector' : ''
+    return `<path class="${active.trim()}" data-from="${escapeHtml(parent.id)}" data-to="${escapeHtml(card.id)}" d="${connectorPath(parent.position, card.position)}"></path>`
   })
   const placement = draftPlacement(cards)
   if (placement !== null) {
@@ -829,7 +878,7 @@ function canvasConnectors(cards) {
 }
 
 function conversationCard(card, graph) {
-  const active = card.dshThreadId === state.activeId ? 'active' : ''
+  const selected = card.id === state.selectedCardId ? 'selected' : ''
   const source = card.parentId === null ? 'DSH 会话' : card.turnIndex === 0 ? 'DSH 分支' : '追问'
   const continueButton = card.canContinue === true
     ? `<button class="graph-continue-button" data-action="open-continue" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" aria-label="添加追问" title="添加追问"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg></button>`
@@ -839,12 +888,12 @@ function conversationCard(card, graph) {
   const foldLabel = collapsed ? '展开后续对话' : '折叠后续对话'
   const foldButton = childCount === 0 || card.canContinue === true ? '' : `<button class="graph-fold-button${collapsed ? ' collapsed' : ''}" data-action="toggle-card-children" data-card="${escapeHtml(card.id)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${foldLabel}" title="${foldLabel}"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3.5 8h9"/>${collapsed ? '<path d="M8 3.5v9"/>' : ''}</svg></button>`
   const branchButton = childCount === 0 || card.canContinue === true || !Number.isInteger(card.answer?.sourceSeq) ? '' : `<button class="graph-branch-button" data-action="open-branch" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" data-seq="${card.answer.sourceSeq}" aria-label="在新对话中分支" title="在新对话中分支"><svg aria-hidden="true" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z" fill="currentColor"/></svg></button>`
-  return `<article class="thread-card ${active}" data-card-id="${escapeHtml(card.id)}" data-position-key="${escapeHtml(card.positionKey)}" data-thread="${card.dshThreadId}" style="left:${card.position.x}px;top:${card.position.y}px;--thread-color:#3478f6">
+  return `<article class="thread-card ${selected}" data-card-id="${escapeHtml(card.id)}" data-position-key="${escapeHtml(card.positionKey)}" data-thread="${card.dshThreadId}" style="left:${card.position.x}px;top:${card.position.y}px;--thread-color:#3478f6">
     <button class="node-handle" data-drag-card="${card.id}" aria-label="拖动 ${escapeHtml(card.question)}" title="拖动卡片"></button>
     ${continueButton}${foldButton}${branchButton}
     <div class="thread-card-head"><span class="topic-dot"></span><button class="thread-title" data-action="show-thread" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" title="查看完整会话：${escapeHtml(card.question)}">${escapeHtml(card.question)}</button></div>
-    <div class="thread-meta"><span>${source}</span><span>第 ${card.turnIndex + 1} 轮</span></div>
-    <div class="thread-answer">${card.answer === null ? '<p class="thread-answer-empty">等待助手回复</p>' : card.answer.pending && card.answer.text === '' ? '<p class="thread-answer-pending">正在回复</p>' : `${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="thread-answer-pending">正在回复</p>' : ''}`}</div>
+    <div class="thread-meta"><span>${source}</span><span>第 ${card.turnIndex + 1} 轮</span>${card.error === null ? '' : '<span class="card-error-status">失败</span>'}${card.processCount > 0 ? `<span class="card-process-count">工具 ${card.processCount}</span>` : ''}</div>
+    <div class="thread-answer">${card.answer === null ? (card.error === null ? '<p class="thread-answer-empty">等待助手回复</p>' : '') : card.answer.pending && card.answer.text === '' ? '<p class="thread-answer-pending">正在回复</p>' : `${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="thread-answer-pending">正在回复</p>' : ''}`}${card.error === null ? '' : `<p class="thread-answer-error" title="${escapeHtml(card.error.text)}">本轮失败：${escapeHtml(card.error.text)}</p>`}</div>
     <footer><button data-action="show-thread" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" title="查看完整会话" aria-label="查看完整会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 8.5 8 2.5l6 6V13.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5Z"/><path d="M6.2 14v-3.6a1.8 1.8 0 0 1 3.6 0V14" /></svg>详情</button><button data-action="open-dsh" data-thread="${card.dshThreadId}" data-seq="${Number.isInteger(card.sourceSeq) ? card.sourceSeq : ''}" title="在 DSH 中打开" aria-label="在 DSH 中打开"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4.5A1.5 1.5 0 0 0 3 5v6.5A1.5 1.5 0 0 0 4.5 13H11a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M9.5 3.5h3v3M12.4 3.6 7.5 8.5"/></svg>DSH</button><button data-action="archive-thread" data-thread="${card.dshThreadId}" title="归档此会话" aria-label="归档此会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5h11M5.5 7v5.5a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1V7"/><path d="M4 5 5 2.8a.7.7 0 0 1 .6-.4h4.8a.7.7 0 0 1 .6.4L12 5M6 9.5h4"/></svg>归档</button></footer>
   </article>`
 }
@@ -852,6 +901,60 @@ function conversationCard(card, graph) {
 function draftActions(draft) {
   const disabled = draft.sending ? 'disabled' : ''
   return `<div class="draft-actions"><button type="button" data-action="cancel-draft" ${disabled} aria-label="取消" title="取消"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button><button class="primary" type="submit" ${disabled} aria-label="发送" title="发送"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.5v-9M4.5 7 8 3.5 11.5 7"/></svg></button></div>`
+}
+
+function quickPhraseEditor(draft) {
+  const disabled = draft.sending ? 'disabled' : ''
+  const phrases = state.quickPhrases.map((phrase, index) => `<div class="draft-quick-phrase-editor-row"><input data-quick-phrase-index="${index}" maxlength="${MAX_QUICK_PHRASE_LENGTH}" value="${escapeHtml(phrase)}" aria-label="快捷词 ${index + 1}" ${disabled}><button type="button" data-action="remove-quick-phrase" data-quick-phrase-index="${index}" aria-label="删除 ${escapeHtml(phrase)}" title="删除" ${disabled}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button></div>`).join('')
+  return `<section class="draft-quick-editor" aria-label="编辑快捷词"><div class="draft-quick-editor-list">${phrases}</div><div class="draft-quick-phrase-add"><input maxlength="${MAX_QUICK_PHRASE_LENGTH}" placeholder="添加快捷词" aria-label="添加快捷词" ${disabled}><button class="primary" type="button" data-action="add-quick-phrase" aria-label="添加快捷词" title="添加快捷词" ${disabled}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg></button></div><button class="draft-quick-editor-close" type="button" data-action="close-quick-phrase-editor" ${disabled}>完成</button></section>`
+}
+
+function draftQuickPhrases(draft) {
+  const disabled = draft.sending ? 'disabled' : ''
+  if (state.quickPhraseEditorOpen) return quickPhraseEditor(draft)
+  const phrases = state.quickPhrases.map(phrase => `<button class="draft-quick-phrase" type="button" data-action="insert-quick-phrase" data-quick-phrase="${escapeHtml(phrase)}" ${disabled}>${escapeHtml(phrase)}</button>`).join('')
+  return `<div class="draft-quick-phrases" aria-label="常用补充词">${phrases}<button class="draft-quick-phrase-add-button" type="button" data-action="open-quick-phrase-editor" aria-label="管理快捷词" title="管理快捷词" ${disabled}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9"/></svg></button></div>`
+}
+
+function insertQuickPhrase(phrase) {
+  const input = document.querySelector('[data-draft] textarea')
+  if (!(input instanceof HTMLTextAreaElement) || state.draft === null) return
+  const start = input.selectionStart
+  const end = input.selectionEnd
+  const prefix = input.value.slice(0, start)
+  const suffix = input.value.slice(end)
+  const separator = prefix !== '' && !prefix.endsWith('\n') ? '\n' : ''
+  const text = `${prefix}${separator}${phrase}${suffix}`
+  if (text.length > input.maxLength) return setError('追问内容不能超过 4000 个字符')
+  const caret = prefix.length + separator.length + phrase.length
+  input.value = text
+  state.draft.text = text
+  input.focus()
+  input.setSelectionRange(caret, caret)
+}
+
+function addQuickPhrase(value) {
+  const phrase = value.trim().slice(0, MAX_QUICK_PHRASE_LENGTH)
+  if (phrase === '') return false
+  if (state.quickPhrases.includes(phrase)) return setError('这个快捷词已经存在')
+  if (state.quickPhrases.length >= MAX_QUICK_PHRASES) return setError(`最多保留 ${MAX_QUICK_PHRASES} 个快捷词`)
+  state.quickPhrases.push(phrase)
+  persistQuickPhrases()
+  return true
+}
+
+function updateQuickPhrase(index, value) {
+  if (!Number.isInteger(index) || index < 0 || index >= state.quickPhrases.length) return
+  const phrase = value.trim().slice(0, MAX_QUICK_PHRASE_LENGTH)
+  if (phrase === '') {
+    state.quickPhrases.splice(index, 1)
+  } else if (state.quickPhrases.some((item, itemIndex) => itemIndex !== index && item === phrase)) {
+    return setError('这个快捷词已经存在')
+  } else {
+    state.quickPhrases[index] = phrase
+  }
+  persistQuickPhrases()
+  render()
 }
 
 function draftPlacement(cards) {
@@ -875,8 +978,12 @@ function draftCard(cards) {
   const continuing = draft.kind === 'continue'
   return `<article class="thread-card draft-card" data-card-id="draft" style="left:${placement.position.x}px;top:${placement.position.y}px;--thread-color:#3478f6">
     <div class="thread-card-head"><span class="topic-dot"></span><strong>${continuing ? '新的追问' : '新的分支'}</strong></div>
-    <form class="draft-branch-form" data-draft><textarea maxlength="4000" placeholder="${continuing ? '输入追问' : '输入这个分支的新问题'}" ${draft.sending ? 'disabled' : ''}>${escapeHtml(draft.text)}</textarea>${draftActions(draft)}</form>
+    <form class="draft-branch-form" data-draft>${draftQuickPhrases(draft)}<textarea maxlength="4000" placeholder="${continuing ? '输入追问' : '输入这个分支的新问题'}" ${draft.sending ? 'disabled' : ''}>${escapeHtml(draft.text)}</textarea>${draftActions(draft)}</form>
   </article>`
+}
+
+function selectionFollowupButton() {
+  return `<button class="selection-followup" type="button" data-action="follow-selection" hidden aria-label="基于所选内容创建追问" title="基于所选内容追问"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 3.5h10v6.25H7.2L4 12.5V9.75H3Z"/><path d="M8 4.9v3.4M6.3 6.6h3.4"/></svg><span>追问</span></button>`
 }
 
 // Cards are mounted into the DOM only when they intersect the viewport
@@ -935,6 +1042,10 @@ function renderCanvas() {
   state.canvasCards = cards
   state.canvasCardsById = new Map(cards.map(card => [card.id, card]))
   state.canvasGraph = graph
+  if (state.inspectorCardId !== null && !state.canvasCardsById.has(state.inspectorCardId)) {
+    state.inspectorCardId = null
+    state.inspectorOpening = false
+  }
   if (!state.canvasViewInitialized) {
     state.canvasCamera = initialCanvasCamera(cards)
     state.canvasViewInitialized = true
@@ -945,7 +1056,8 @@ function renderCanvas() {
   const visible = visibleCardIds(cards)
   state.mountedCardIds = new Set(visible)
   const mounted = cards.filter(card => visible.has(card.id))
-  return `<section class="canvas-view"><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><svg class="connectors">${canvasConnectors(cards)}</svg><div class="cards-layer">${mounted.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div></section>`
+  const inspector = state.inspectorCardId === null ? '' : renderCardInspector(state.canvasCardsById.get(state.inspectorCardId))
+  return `<section class="canvas-view"><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><svg class="connectors">${canvasConnectors(cards)}</svg><div class="cards-layer">${mounted.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div>${inspector}</section>`
 }
 
 function isProcessMessage(message) {
@@ -988,6 +1100,63 @@ function processRecords(process, messageId) {
   return `<section class="process-records${expanded ? ' expanded' : ''}"><button class="process-records-fold" data-action="toggle-message" data-message="${escapeHtml(key)}"><span>${expanded ? '收起过程记录' : '过程记录'}</span><span class="process-count">${process.length}</span></button>${expanded ? entries : ''}</section>`
 }
 
+function messagesForCard(card) {
+  const thread = state.workspace?.threads.find(item => item.id === card.dshThreadId)
+  if (thread === undefined) return { thread: null, messages: [] }
+  const messages = messagesFor(thread)
+  let turnIndex = -1
+  let start = -1
+  for (let index = 0; index < messages.length; index++) {
+    if (messages[index].kind !== 'user') continue
+    turnIndex += 1
+    if (turnIndex === card.turnIndex) {
+      start = index
+      break
+    }
+  }
+  if (start === -1) return { thread, messages: [] }
+  const end = messages.findIndex((message, index) => index > start && message.kind === 'user')
+  return { thread, messages: messages.slice(start, end === -1 ? undefined : end) }
+}
+
+function inspectorProcessEntries(messages) {
+  const entries = []
+  for (const message of messages) {
+    if (Array.isArray(message.process)) {
+      entries.push(...message.process.map(entry => ({ ...entry })))
+      continue
+    }
+    if (message.kind === 'tool') {
+      entries.push({ name: processSummary(message.text), arguments: message.text, result: null, error: null })
+      continue
+    }
+    if (message.kind === 'tool-result') {
+      const previous = entries.at(-1)
+      if (previous !== undefined && previous.result === null && previous.error === null) previous.result = message.text
+      else entries.push({ name: '工具结果', arguments: null, result: message.text, error: null })
+    }
+  }
+  return entries
+}
+
+function renderCardInspector(card) {
+  if (card === undefined) return ''
+  const { thread, messages } = messagesForCard(card)
+  if (thread === null) return ''
+  const process = inspectorProcessEntries(messages)
+  const answer = card.answer === null
+    ? card.error === null ? '<p class="card-inspector-pending">等待助手回复</p>' : ''
+    : `<article class="card-inspector-answer">${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="card-inspector-pending">正在回复</p>' : ''}</article>`
+  const error = card.error === null ? '' : `<section class="card-inspector-error" role="alert"><strong>本轮未完成</strong><p>${escapeHtml(card.error.text)}</p></section>`
+  const processRecordsHtml = process.length === 0 ? '' : processRecords(process, `${thread.id}:${card.id}:inspector`)
+  const continueAction = card.canContinue === true ? `<button type="button" data-action="open-continue" data-thread="${thread.id}" data-card="${escapeHtml(card.id)}"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 3.5h11v7h-6l-3.5 2.5v-2.5h-1.5Z"/><path d="M8 5.5v3M6.5 7h3"/></svg>继续追问</button>` : ''
+  const branch = Number.isInteger(card.answer?.sourceSeq)
+    ? `<button type="button" data-action="open-branch" data-thread="${thread.id}" data-card="${escapeHtml(card.id)}" data-seq="${card.answer.sourceSeq}"><svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="4" cy="3.5" r="1.5"/><circle cx="12" cy="3.5" r="1.5"/><circle cx="12" cy="12.5" r="1.5"/><path d="M5.5 3.5h2A2.5 2.5 0 0 1 10 6v5"/></svg>创建分支</button>`
+    : ''
+  const openDshAction = `<button class="primary" type="button" data-action="open-dsh" data-thread="${thread.id}" data-seq="${Number.isInteger(card.answer?.sourceSeq) ? card.answer.sourceSeq : ''}"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M7 3.5H4.5A1.5 1.5 0 0 0 3 5v6.5A1.5 1.5 0 0 0 4.5 13H11a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M9.5 3.5h3v3M12.4 3.6 7.5 8.5"/></svg>在 DSH 中打开</button>`
+  return `<aside class="card-inspector${state.inspectorOpening ? ' is-opening' : ''}" aria-label="卡片详情" data-inspector-card="${escapeHtml(card.id)}"><header class="card-inspector-head"><div><div class="card-inspector-meta"><span>第 ${card.turnIndex + 1} 轮</span>${card.error === null ? '' : '<span class="card-inspector-error-status">失败</span>'}${process.length > 0 ? `<span>工具 ${process.length}</span>` : ''}</div><h2>${escapeHtml(card.question)}</h2></div><button class="card-inspector-close" type="button" data-action="close-card-inspector" aria-label="关闭卡片详情" title="关闭"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button></header><div class="card-inspector-scroll">${error}${answer}${processRecordsHtml}</div><footer class="card-inspector-actions">${continueAction}${branch}${openDshAction}</footer></aside>`
+}
+
 function renderThread() {
   const thread = currentThread()
   if (thread === null) return renderCanvas()
@@ -1005,8 +1174,13 @@ function render() {
     const detail = document.querySelector('.detail-scroll')
     if (detail instanceof HTMLElement) state.detailScrollByThread.set(state.detailThreadId, detail.scrollTop)
   }
+  if (state.mode === 'canvas' && state.inspectorCardId !== null) {
+    const inspector = document.querySelector('.card-inspector-scroll')
+    if (inspector instanceof HTMLElement) state.inspectorScrollByCard.set(state.inspectorCardId, inspector.scrollTop)
+  }
   state.detailThreadId = state.mode === 'thread' ? state.activeId : null
   const detailScrollTop = state.detailThreadId === null ? null : state.detailScrollByThread.get(state.detailThreadId) ?? null
+  const inspectorScrollTop = state.mode === 'canvas' && state.inspectorCardId !== null ? state.inspectorScrollByCard.get(state.inspectorCardId) ?? null : null
   const cardScrollTops = new Map()
   if (state.mode === 'canvas') {
     // Key by the unique card id: every card of a session shares data-thread,
@@ -1027,7 +1201,7 @@ function render() {
   const canvasControls = state.mode === 'canvas' && (threads.length > 0 || state.draft?.kind === 'new') ? `<div class="canvas-controls"><button data-action="layout" title="整理节点" aria-label="整理节点"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>整理</button><button data-action="focus-active" title="定位到当前会话" aria-label="定位到当前会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.5v2.6M8 11.9v2.6M1.5 8h2.6M11.9 8h2.6"/></svg>定位</button><button data-action="zoom-out" aria-label="缩小" title="缩小"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button><span>${Math.round(state.zoom * 100)}%</span><button data-action="zoom-in" aria-label="放大" title="放大"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg></button></div>` : ''
   const detailAvailable = currentThread() !== null
   const canvasTabs = `<nav class="canvas-tabs" aria-label="会话地图视图"><button class="${state.mode === 'canvas' ? 'active' : ''}" data-action="show-canvas">地图</button><button class="${state.mode === 'thread' ? 'active' : ''}" data-action="show-thread" data-thread="${state.activeId ?? ''}" ${detailAvailable ? '' : 'disabled'}>详情</button></nav>`
-  app.innerHTML = `<main class="synapse-shell ${state.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside class="sidebar"><div class="sidebar-brand-row"><div class="brand" aria-label="Synapse"><svg class="brand-mark" aria-hidden="true" viewBox="0 0 32 32" fill="none"><path d="M9 10.5 16 7l7 3.5M9 10.5v8L16 22m0-15v15m7-11.5v8L16 22"/><circle cx="9" cy="10" r="2.5"/><circle cx="23" cy="10" r="2.5"/><circle cx="16" cy="23" r="2.5"/></svg><strong>Synapse</strong></div><button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}" title="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2.25"/><path d="M6 2v12"/></svg></button></div><button class="new-workspace" type="button" data-action="create-session" ${state.draft !== null ? 'disabled' : ''}><svg class="new-session-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.75v6.5M4.75 8h6.5"/></svg><span>新会话</span></button><label class="workspace-label"><span>工作区</span><span class="workspace-select"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 4.75h3l1.2 1.5h6.8v5.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/></svg><select data-action="select-workspace" aria-label="选择工作区" ${state.draft !== null ? 'disabled' : ''}>${choices.map(item => `<option value="${item.id}" title="${escapeHtml(item.path ?? item.title)}" ${item.id === selectedWorkspaceId ? 'selected' : ''}>${escapeHtml(item.title)}</option>`).join('')}</select></span></label><div class="sidebar-heading"><span>会话</span></div><nav class="thread-tree">${threads.map(thread => `<button class="tree-row ${thread.id === state.activeId ? 'active' : ''}" data-action="select-thread" data-thread="${thread.id}" style="--thread-color:#374151"><span class="tree-dot"></span><span>${escapeHtml(threadListTitle(thread))}</span>${thread.parentId === null ? '' : '<i>分支</i>'}</button>`).join('') || '<p class="tree-empty">暂未同步会话</p>'}</nav></aside><header class="topbar"><div class="view-switch" role="group" aria-label="视图切换"><button data-action="close" type="button" aria-pressed="false">对话</button><button class="active" type="button" aria-pressed="true">会话地图</button></div>${canvasControls}</header><section class="main-stage">${state.error ? `<div class="status-message" role="alert"><span>${escapeHtml(state.error)}</span><button data-action="dismiss-error" aria-label="关闭" title="关闭">×</button></div>` : ''}${canvasTabs}${view}</section></main>`
+  app.innerHTML = `<main class="synapse-shell ${state.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside class="sidebar"><div class="sidebar-brand-row"><div class="brand" aria-label="Synapse"><svg class="brand-mark" aria-hidden="true" viewBox="0 0 32 32" fill="none"><path d="M9 10.5 16 7l7 3.5M9 10.5v8L16 22m0-15v15m7-11.5v8L16 22"/><circle cx="9" cy="10" r="2.5"/><circle cx="23" cy="10" r="2.5"/><circle cx="16" cy="23" r="2.5"/></svg><strong>Synapse</strong></div><button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}" title="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2.25"/><path d="M6 2v12"/></svg></button></div><button class="new-workspace" type="button" data-action="create-session" ${state.draft !== null ? 'disabled' : ''}><svg class="new-session-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.75v6.5M4.75 8h6.5"/></svg><span>新会话</span></button><label class="workspace-label"><span>工作区</span><span class="workspace-select"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 4.75h3l1.2 1.5h6.8v5.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/></svg><select data-action="select-workspace" aria-label="选择工作区" ${state.draft !== null ? 'disabled' : ''}>${choices.map(item => `<option value="${item.id}" title="${escapeHtml(item.path ?? item.title)}" ${item.id === selectedWorkspaceId ? 'selected' : ''}>${escapeHtml(item.title)}</option>`).join('')}</select></span></label><div class="sidebar-heading"><span>会话</span></div><nav class="thread-tree">${threads.map(thread => `<button class="tree-row ${thread.id === state.activeId ? 'active' : ''}" data-action="select-thread" data-thread="${thread.id}" style="--thread-color:#374151"><span class="tree-dot"></span><span>${escapeHtml(threadListTitle(thread))}</span>${thread.parentId === null ? '' : '<i>分支</i>'}</button>`).join('') || '<p class="tree-empty">暂未同步会话</p>'}</nav></aside><header class="topbar"><div class="view-switch" role="group" aria-label="视图切换"><button data-action="close" type="button" aria-pressed="false">对话</button><button class="active" type="button" aria-pressed="true">会话地图</button></div>${canvasControls}</header><section class="main-stage">${state.error ? `<div class="status-message" role="alert"><span>${escapeHtml(state.error)}</span><button data-action="dismiss-error" aria-label="关闭" title="关闭">×</button></div>` : ''}${canvasTabs}${view}${selectionFollowupButton()}</section></main>`
   installDragging()
   cacheCardConnectors()
   // The initial camera from renderCanvas is inset (viewport not laid out yet);
@@ -1043,6 +1217,14 @@ function render() {
   if (detailScrollTop !== null) window.requestAnimationFrame(() => {
     const nextDetail = document.querySelector('.detail-scroll')
     if (nextDetail instanceof HTMLElement) nextDetail.scrollTop = detailScrollTop
+  })
+  if (inspectorScrollTop !== null) window.requestAnimationFrame(() => {
+    const inspector = document.querySelector('.card-inspector-scroll')
+    if (inspector instanceof HTMLElement) inspector.scrollTop = inspectorScrollTop
+  })
+  if (state.inspectorOpening) window.requestAnimationFrame(() => {
+    document.querySelector('.card-inspector')?.classList.remove('is-opening')
+    state.inspectorOpening = false
   })
   // Jump the detail view to the card the user clicked: card ids carry the
   // source sequence (`<thread>:turn:<seq>`), which matches data-message-seq
@@ -1061,6 +1243,37 @@ function render() {
 
 function renderPreservingDetailScroll() {
   render()
+}
+
+let inspectorCloseTimer = 0
+function openCardInspector(cardId) {
+  if (inspectorCloseTimer !== 0) {
+    window.clearTimeout(inspectorCloseTimer)
+    inspectorCloseTimer = 0
+  }
+  state.inspectorOpening = state.inspectorCardId === null
+  state.inspectorCardId = cardId
+}
+
+function closeCardInspector({ animate = true } = {}) {
+  if (state.inspectorCardId === null) return
+  if (inspectorCloseTimer !== 0) window.clearTimeout(inspectorCloseTimer)
+  const cardId = state.inspectorCardId
+  const inspector = document.querySelector('.card-inspector')
+  if (!animate || !(inspector instanceof HTMLElement)) {
+    state.inspectorCardId = null
+    state.inspectorOpening = false
+    render()
+    return
+  }
+  inspector.classList.add('is-closing')
+  inspectorCloseTimer = window.setTimeout(() => {
+    inspectorCloseTimer = 0
+    if (state.inspectorCardId !== cardId) return
+    state.inspectorCardId = null
+    state.inspectorOpening = false
+    render()
+  }, 180)
 }
 
 function applyCanvasTransform() {
@@ -1182,6 +1395,56 @@ function focusActiveCard() {
   syncCanvasViewport()
 }
 
+let selectionFollowup = null
+let selectionFollowupFrame = 0
+
+function hideSelectionFollowup() {
+  if (selectionFollowupFrame !== 0) {
+    window.cancelAnimationFrame(selectionFollowupFrame)
+    selectionFollowupFrame = 0
+  }
+  selectionFollowup = null
+  const button = app.querySelector('.selection-followup')
+  if (button instanceof HTMLButtonElement) button.hidden = true
+}
+
+function selectionFollowupTarget(range) {
+  const start = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+  const end = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
+  if (!(start instanceof Element) || !(end instanceof Element)) return null
+  const answer = start.closest('.thread-answer')
+  if (answer instanceof HTMLElement && answer.contains(end)) {
+    const card = answer.closest('.thread-card[data-thread]:not(.draft-card)')
+    if (card instanceof HTMLElement && card.dataset.thread !== undefined) return { threadId: card.dataset.thread }
+  }
+  const messageBody = start.closest('.message-assistant .message-body')
+  const thread = currentThread()
+  if (messageBody instanceof HTMLElement && messageBody.contains(end) && thread !== null) return { threadId: thread.id }
+  return null
+}
+
+function updateSelectionFollowup() {
+  selectionFollowupFrame = 0
+  const button = app.querySelector('.selection-followup')
+  const selection = window.getSelection()
+  if (!(button instanceof HTMLButtonElement) || state.draft !== null || selection === null || selection.rangeCount !== 1 || selection.isCollapsed) return hideSelectionFollowup()
+  const text = selection.toString().trim()
+  const range = selection.getRangeAt(0)
+  const target = text === '' || text.length > 4000 ? null : selectionFollowupTarget(range)
+  const rect = range.getBoundingClientRect()
+  if (target === null || rect.width === 0 || rect.height === 0) return hideSelectionFollowup()
+  selectionFollowup = { ...target, text }
+  button.dataset.thread = target.threadId
+  button.style.left = `${Math.min(window.innerWidth - 12, Math.max(76, rect.right))}px`
+  button.style.top = `${Math.min(window.innerHeight - 38, Math.max(8, rect.bottom + 8))}px`
+  button.hidden = false
+}
+
+function queueSelectionFollowup() {
+  if (selectionFollowupFrame !== 0) return
+  selectionFollowupFrame = window.requestAnimationFrame(updateSelectionFollowup)
+}
+
 app.addEventListener('pointerdown', event => {
   const viewport = canvasViewport(event.target)
   if (!(viewport instanceof HTMLElement) || event.target instanceof Element && event.target.closest('.thread-card, button, textarea, select')) return
@@ -1249,6 +1512,19 @@ app.addEventListener('wheel', event => {
 // wipe the user's selection.
 let pointerDownPosition = null
 app.addEventListener('pointerdown', event => { pointerDownPosition = { x: event.clientX, y: event.clientY } })
+app.addEventListener('pointerdown', event => {
+  const button = event.target instanceof Element ? event.target.closest('.selection-followup') : null
+  if (button instanceof HTMLButtonElement) event.preventDefault()
+  else hideSelectionFollowup()
+})
+app.addEventListener('pointerup', queueSelectionFollowup)
+app.addEventListener('scroll', hideSelectionFollowup, true)
+document.addEventListener('selectionchange', queueSelectionFollowup)
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || state.mode !== 'canvas' || state.inspectorCardId === null) return
+  event.preventDefault()
+  closeCardInspector({ animate: false })
+})
 
 app.addEventListener('click', async event => {
   const button = event.target.closest('[data-action]')
@@ -1262,23 +1538,60 @@ app.addEventListener('click', async event => {
       && Math.hypot(event.clientX - pointerDownPosition.x, event.clientY - pointerDownPosition.y) > 4) return
     const thread = state.workspace?.threads.find(item => item.id === card.dataset.thread)
     if (thread === undefined) return
+    const cardId = card.dataset.cardId
+    if (cardId === undefined) return
     state.activeId = thread.id
+    state.selectedCardId = cardId
+    openCardInspector(cardId)
     state.error = ''
     render()
     void loadThreadHistory(thread)
     // Bidirectional current-session sync: switch DSH's current session
     // without closing the map; the client confirms via synapse:current-session.
-    if (thread.dshSessionId !== null) post('synapse:activate-session', { sessionId: thread.dshSessionId })
+    if (thread.dshSessionId !== null) {
+      if (thread.dshSessionId !== state.currentDsh?.id) state.mapCardSessionSwitches.add(thread.dshSessionId)
+      post('synapse:activate-session', { sessionId: thread.dshSessionId })
+    }
     return
   }
   const thread = state.workspace?.threads.find(item => item.id === button.dataset.thread)
   try {
+    if (button.dataset.action === 'follow-selection') {
+      const followup = selectionFollowup
+      hideSelectionFollowup()
+      if (followup !== null && thread !== undefined && thread.id === followup.threadId && state.draft === null) openContinue(thread, undefined, followup.text)
+      return
+    }
+    if (button.dataset.action === 'insert-quick-phrase' && button.dataset.quickPhrase !== undefined) insertQuickPhrase(button.dataset.quickPhrase)
+    if (button.dataset.action === 'open-quick-phrase-editor') { state.quickPhraseEditorOpen = true; render() }
+    if (button.dataset.action === 'close-quick-phrase-editor') { state.quickPhraseEditorOpen = false; render() }
+    if (button.dataset.action === 'add-quick-phrase') {
+      const editor = button.closest('.draft-quick-phrase-add')
+      const input = editor?.querySelector('input')
+      if (input instanceof HTMLInputElement && addQuickPhrase(input.value)) {
+        render()
+        window.setTimeout(() => document.querySelector('.draft-quick-phrase-add input')?.focus(), 0)
+      }
+    }
+    if (button.dataset.action === 'remove-quick-phrase') {
+      const index = Number(button.dataset.quickPhraseIndex)
+      if (Number.isInteger(index) && index >= 0 && index < state.quickPhrases.length) {
+        state.quickPhrases.splice(index, 1)
+        persistQuickPhrases()
+        render()
+      }
+    }
     if (button.dataset.action === 'close') post('synapse:close')
+    if (button.dataset.action === 'close-card-inspector') { closeCardInspector(); return }
     if (button.dataset.action === 'toggle-sidebar') { state.sidebarCollapsed = !state.sidebarCollapsed; render() }
     if (button.dataset.action === 'create-session') openNewSession()
     if (button.dataset.action === 'open-current' && state.currentDsh !== null) post('synapse:open-session', { sessionId: state.currentDsh.id })
     if (button.dataset.action === 'select-thread' && thread !== undefined) {
+      state.mapCardSessionSwitches.clear()
       state.activeId = thread.id
+      state.selectedCardId = null
+      state.inspectorCardId = null
+      state.inspectorOpening = false
       state.error = ''
       if (state.workspace !== null) revealConversationThread(conversationCards(state.workspace.threads), thread.id)
       render()
@@ -1313,7 +1626,7 @@ app.addEventListener('click', async event => {
       const fallbackSeq = latestMessage(thread, 'assistant')?.sourceSeq
       openBranch(thread, Number.isInteger(requestedSeq) ? requestedSeq : fallbackSeq, button.dataset.card)
     }
-    if (button.dataset.action === 'cancel-draft') { state.draft = null; render() }
+    if (button.dataset.action === 'cancel-draft') { state.draft = null; state.quickPhraseEditorOpen = false; render() }
     if (button.dataset.action === 'toggle-message' && button.dataset.message !== undefined) { state.expandedMessageIds.has(button.dataset.message) ? state.expandedMessageIds.delete(button.dataset.message) : state.expandedMessageIds.add(button.dataset.message); renderPreservingDetailScroll() }
     if (button.dataset.action === 'open-dsh' && thread?.dshSessionId !== null) post('synapse:open-session', { sessionId: thread.dshSessionId, seq: Number.isInteger(Number(button.dataset.seq)) ? Number(button.dataset.seq) : undefined })
     if (button.dataset.action === 'archive-thread' && thread !== undefined) await archiveThread(thread)
@@ -1330,9 +1643,16 @@ app.addEventListener('click', async event => {
 })
 
 app.addEventListener('change', event => {
+  const quickPhrase = event.target instanceof Element ? event.target.closest('[data-quick-phrase-index]') : null
+  if (quickPhrase instanceof HTMLInputElement) {
+    updateQuickPhrase(Number(quickPhrase.dataset.quickPhraseIndex), quickPhrase.value)
+    return
+  }
   const select = event.target.closest('[data-action="select-workspace"]')
   if (!(select instanceof HTMLSelectElement)) return
   const choice = workspaceChoices().find(item => item.id === select.value)
+  state.inspectorCardId = null
+  state.inspectorOpening = false
   if (choice?.source === 'dsh') {
     // Map → native sync: switching workspaces moves DSH's current session to
     // the workspace's most recently updated session, keeping both sides in step.
@@ -1386,17 +1706,27 @@ window.addEventListener('message', event => {
   if (data.type === 'synapse:current-session') {
     const previousId = state.currentDsh?.id
     state.currentDsh = data.session
+    const preserveCanvasCamera = previousId !== data.session?.id && state.mapCardSessionSwitches.delete(data.session?.id)
     const thread = currentDshThread()
     if (thread !== undefined) {
+      const preserveSelectedCard = state.activeId === thread.id
       state.activeId = thread.id
+      if (!preserveSelectedCard) {
+        state.selectedCardId = null
+        state.inspectorCardId = null
+        state.inspectorOpening = false
+      }
       if (state.workspace !== null) revealConversationThread(conversationCards(state.workspace.threads), thread.id)
     }
     if (previousId !== data.session?.id) {
       // A real session switch: re-center on the new session's latest turn,
       // whether it lives in the same workspace (openCurrentWorkspace returns
       // false) or a different one (it resets the camera itself).
-      void openCurrentWorkspace().then(opened => {
-        if (!opened && canReplaceView()) { render(); focusActiveCard() }
+      void openCurrentWorkspace({ preserveCanvasCamera }).then(opened => {
+        if (!opened && canReplaceView()) {
+          render()
+          if (!preserveCanvasCamera) focusActiveCard()
+        }
       }).catch(setError)
     }
     else if (canReplaceView()) render()

@@ -406,6 +406,7 @@ export class WorkspaceStore {
       createdAt: now,
       updatedAt: now,
       messages: [],
+      pendingProcess: [],
     }
     workspace.threads.push(thread)
     // A child may arrive before its parent during startup replay. Repair that
@@ -439,10 +440,11 @@ export class WorkspaceStore {
       kind: projection.kind,
       sourceSeq: event.seq,
       at,
-      ...(projection.kind === 'assistant'
-        ? { turn: event.data.turn, step: event.data.step, process: [] }
+      ...(projection.kind === 'assistant' || projection.kind === 'error'
+        ? { turn: event.data?.turn, step: event.data?.step, process: [] }
         : {}),
     }
+    this.attachPendingProcess(thread, message)
     thread.messages.push(message)
     thread.updatedAt = at
     workspace.updatedAt = at
@@ -455,37 +457,45 @@ export class WorkspaceStore {
   /**
    * Fold one tool call or result into the assistant message of its own
    * turn/step, keyed by `callId`, so a tool invocation never becomes a
-   * separate canvas card. A legacy assistant message without `turn`/`step` is
-   * the fallback target; an event with no such target is dropped.
+   * separate canvas card. If a tool result arrives before its associated
+   * assistant/error message, retain it on the thread until that turn appears.
    */
   foldToolProcess(thread, event) {
     const at = new Date(event.time).toISOString()
+    const data = event.data ?? {}
     const target = [...thread.messages].reverse().find(message =>
-      message.kind === 'assistant'
-      && (message.turn === event.data.turn && message.step === event.data.step
+      (message.kind === 'assistant' || message.kind === 'error')
+      && (message.turn === data.turn && message.step === data.step
         || message.turn === undefined && message.step === undefined))
-    if (target === undefined) return
-    const process = target.process ??= []
-    const callId = String(event.type === 'tool/call' ? event.data.callId : event.data.message?.source?.callId ?? '')
+    const process = target === undefined ? (thread.pendingProcess ??= []) : (target.process ??= [])
+    const callId = String(event.type === 'tool/call' ? data.callId : data.message?.source?.callId ?? '')
     const entry = process.find(item => item.callId === callId)
     if (event.type === 'tool/call') {
       if (entry === undefined) {
-        process.push({ callId, name: event.data.name, arguments: event.data.arguments, result: null, error: null })
+        process.push({ callId, turn: data.turn, step: data.step, name: data.name, arguments: data.arguments, result: null, error: null })
       } else {
-        entry.name = event.data.name
-        entry.arguments = event.data.arguments
+        entry.name = data.name
+        entry.arguments = data.arguments
       }
     } else {
-      const outcome = contentText(event.data.message?.content)
-      const error = event.data.error === undefined ? null : `${event.data.error.name}: ${event.data.error.code}`
+      const outcome = contentText(data.message?.content)
+      const error = errorText(data.error)
       if (entry === undefined) {
-        process.push({ callId, name: '工具调用', arguments: null, result: outcome, error })
+        process.push({ callId, turn: data.turn, step: data.step, name: '工具调用', arguments: null, result: outcome, error })
       } else {
         entry.result = outcome
         entry.error = error
       }
     }
     thread.updatedAt = at
+  }
+
+  attachPendingProcess(thread, message) {
+    if (!Array.isArray(thread.pendingProcess) || thread.pendingProcess.length === 0 || !Array.isArray(message.process)) return
+    const matching = thread.pendingProcess.filter(entry => entry.turn === message.turn && entry.step === message.step)
+    if (matching.length === 0) return
+    message.process.push(...matching.map(({ turn, step, ...entry }) => entry))
+    thread.pendingProcess = thread.pendingProcess.filter(entry => entry.turn !== message.turn || entry.step !== message.step)
   }
 
   thread({ title, parentId, dshSessionId, dshSessionTitle, position, color, now, order }) {
@@ -500,6 +510,7 @@ export class WorkspaceStore {
       createdAt: now,
       updatedAt: now,
       messages: [],
+      pendingProcess: [],
     }
   }
 
@@ -528,7 +539,7 @@ function normalizeState(value) {
         migrated = true
         const notes = Array.isArray(thread.notes) ? thread.notes : []
         const { notes: _notes, ...rest } = thread
-        return { ...rest, messages: notes }
+        return { ...rest, messages: notes, pendingProcess: [] }
       }) : [],
     }))
     state = { ...value, version: value.version, hiddenSessionIds, workspaces }
@@ -638,14 +649,30 @@ function projectableEvent(event) {
       return isRuntimeContextText(text) ? null : noteProjection('user', text)
     }
     case 'assistant/message':
-      return noteProjection('assistant', contentText(event.data.message.content))
+      return noteProjection('assistant', contentText(event.data?.message?.content))
     case 'todo/write':
-      return noteProjection('todo', event.data.todos.map(todo => `[${todo.status}] ${todo.content}`).join('\n'))
-    case 'turn/end':
-      return event.data.reason.kind === 'error' ? noteProjection('error', event.data.reason.error.message) : null
-    default:
+      return noteProjection('todo', Array.isArray(event.data?.todos) ? event.data.todos.map(todo => `[${todo.status}] ${todo.content}`).join('\n') : '')
+    case 'turn/end': {
+      const reason = event.data?.reason
+      if (reason?.kind === 'error') return noteProjection('error', errorText(reason.error) ?? '本轮执行失败')
+      if (reason?.kind === 'cancelled' || reason?.kind === 'canceled' || reason?.kind === 'aborted') return noteProjection('error', '本轮已取消')
       return null
+    }
+    default:
+      return /(?:error|failed|failure|cancel(?:led)?|abort)/i.test(event.type)
+        ? noteProjection('error', errorText(event.data?.error ?? event.data?.reason ?? event.data) ?? 'Harness 运行失败')
+        : null
   }
+}
+
+function errorText(value) {
+  if (typeof value === 'string') return value.trim() || null
+  if (value === null || value === undefined || typeof value !== 'object') return null
+  const name = typeof value.name === 'string' && value.name.trim() !== '' ? value.name.trim() : ''
+  const code = typeof value.code === 'string' && value.code.trim() !== '' ? value.code.trim() : ''
+  const message = typeof value.message === 'string' && value.message.trim() !== '' ? value.message.trim() : ''
+  if (message !== '') return [name, code].filter(Boolean).concat(message).join(': ')
+  return [name, code].filter(Boolean).join(': ') || null
 }
 
 function noteProjection(kind, text) {

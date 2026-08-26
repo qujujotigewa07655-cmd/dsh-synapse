@@ -75,6 +75,30 @@ test('projects a batch of session events in a single write', async () => {
   assert.match(await readFile(join(directory, 'state.json'), 'utf8'), /"version": ?4/)
 })
 
+test('retains a tool failure and exposes a failed turn without assistant text', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-synapse-error-projection-'))
+  const store = new WorkspaceStore(join(directory, 'state.json'))
+  await store.projectSession({
+    id: 'session-error', header: { meta: { cwd: 'C:\\work\\errors' } }, firstLiveSeq: 0,
+    events: [
+      { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: '搜索竞品' }] } },
+      { type: 'tool/call', seq: 2, time: 2, data: { turn: 7, step: 1, callId: 'search-1', name: 'web_search', arguments: '{"query":"竞品"}' } },
+      { type: 'tool/result', seq: 3, time: 3, data: { turn: 7, step: 1, error: { name: 'QuotaExceeded', code: 'INSUFFICIENT_BALANCE', message: '余额不足' }, message: { source: { kind: 'tool', callId: 'search-1' }, content: [] } } },
+      { type: 'turn/end', seq: 4, time: 4, data: { turn: 7, step: 1, reason: { kind: 'error', error: { name: 'QuotaExceeded', code: 'INSUFFICIENT_BALANCE', message: '余额不足' } } } },
+    ],
+  })
+
+  const [workspace] = await store.list()
+  const graph = await store.get(workspace.id)
+  const [user, failure] = graph.threads[0].messages
+  assert.equal(user.kind, 'user')
+  assert.equal(failure.kind, 'error')
+  assert.equal(failure.text, 'QuotaExceeded: INSUFFICIENT_BALANCE: 余额不足')
+  assert.equal(failure.process.length, 1)
+  assert.equal(failure.process[0].error, 'QuotaExceeded: INSUFFICIENT_BALANCE: 余额不足')
+  assert.equal(graph.threads[0].pendingProcess.length, 0)
+})
+
 test('migrates v3 tool cards into the assistant process records', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-synapse-migrate-'))
   const dataFile = join(directory, 'state.json')

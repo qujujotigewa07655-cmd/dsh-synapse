@@ -72,7 +72,71 @@ test('clicking a session card syncs the DSH current session', async () => {
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
   const cardClick = source.slice(source.indexOf('if (!(button instanceof HTMLElement)) {'), source.indexOf("if (button.dataset.action === 'close')"))
 
-  assert.match(cardClick, /thread\.dshSessionId !== null\) post\('synapse:activate-session'/)
+  assert.match(cardClick, /post\('synapse:activate-session', \{ sessionId: thread\.dshSessionId \}\)/)
+})
+
+test('switching sessions from a map card keeps the current camera position', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const cardClick = source.slice(source.indexOf('if (!(button instanceof HTMLElement)) {'), source.indexOf("if (button.dataset.action === 'close')"))
+  const currentSession = source.slice(source.indexOf("if (data.type === 'synapse:current-session')"), source.indexOf("if (data.type === 'synapse:live-reply'"))
+
+  assert.match(cardClick, /mapCardSessionSwitches\.add\(thread\.dshSessionId\)/)
+  assert.match(currentSession, /mapCardSessionSwitches\.delete\(data\.session\?\.id\)/)
+  assert.match(currentSession, /openCurrentWorkspace\(\{ preserveCanvasCamera \}\)/)
+  assert.match(currentSession, /if \(!preserveCanvasCamera\) focusActiveCard\(\)/)
+})
+
+test('keeps conversation highlighting separate from the exact selected card', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8')
+  const connectors = source.slice(source.indexOf('function canvasConnectors'), source.indexOf('function conversationCard(card, graph)'))
+  const card = source.slice(source.indexOf('function conversationCard(card, graph)'), source.indexOf('function draftActions'))
+  const cardClick = source.slice(source.indexOf('if (!(button instanceof HTMLElement)) {'), source.indexOf("if (button.dataset.action === 'close')"))
+  const selectThread = source.slice(source.indexOf("button.dataset.action === 'select-thread'"), source.indexOf("button.dataset.action === 'show-thread'"))
+
+  assert.match(source, /selectedCardId: null/)
+  assert.match(card, /card\.id === state\.selectedCardId/)
+  assert.doesNotMatch(card, /dshThreadId === state\.activeId/)
+  assert.match(connectors, /card\.dshThreadId === state\.activeId && parent\.dshThreadId === state\.activeId/)
+  assert.match(connectors, /active-connector/)
+  assert.match(cardClick, /state\.selectedCardId = cardId/)
+  assert.match(selectThread, /state\.selectedCardId = null/)
+  assert.match(styles, /\.connectors path\.active-connector \{ stroke: #3478f6; \}/)
+  assert.match(styles, /\[data-theme="dark"\] \.connectors path\.active-connector \{ stroke: #5b8def; \}/)
+  assert.doesNotMatch(styles, /\.thread-card\.active/)
+})
+
+test('opens the clicked card in a tool-aware detail inspector', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8')
+  const cardClick = source.slice(source.indexOf('if (!(button instanceof HTMLElement)) {'), source.indexOf("if (button.dataset.action === 'close')"))
+  const inspector = source.slice(source.indexOf('function messagesForCard'), source.indexOf('function renderThread'))
+
+  assert.match(source, /inspectorCardId: null/)
+  assert.match(source, /function openCardInspector/)
+  assert.match(cardClick, /openCardInspector\(cardId\)/)
+  assert.match(inspector, /function messagesForCard/)
+  assert.match(inspector, /function inspectorProcessEntries/)
+  assert.match(inspector, /processRecords\(process/)
+  assert.doesNotMatch(inspector, /threadMessage\(thread, message\)/)
+  assert.match(inspector, /class="card-inspector/)
+  assert.match(inspector, /data-action="open-continue"/)
+  assert.doesNotMatch(inspector, /完整对话/)
+  assert.match(inspector, /<svg aria-hidden="true" viewBox="0 0 16 16">/)
+  assert.match(inspector, /card\.canContinue === true/)
+  assert.match(inspector, /card-inspector-error/)
+  assert.match(source, /button\.dataset\.action === 'close-card-inspector'/)
+  assert.match(source, /event\.key !== 'Escape'/)
+  assert.match(source, /processCount/)
+  assert.match(styles, /\.card-inspector \{ position: absolute/)
+  assert.match(styles, /\.card-inspector\.is-opening, \.card-inspector\.is-closing/)
+  assert.match(styles, /\.card-inspector-answer/)
+  assert.doesNotMatch(styles, /\.card-inspector \{[^}]*box-shadow/)
+  assert.match(styles, /\.card-inspector-actions button svg/)
+  assert.doesNotMatch(styles, /\.card-inspector-head \{[^}]*border-bottom/)
+  assert.match(styles, /\.card-inspector \{ top: auto; width: 100%/)
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/)
+  assert.match(styles, /\.thread-meta \.card-process-count/)
 })
 
 test('switching the workspace in the map syncs DSH to its first session', async () => {
@@ -136,6 +200,35 @@ test('leaves text selections inside cards intact', async () => {
   assert.match(cardClick, /event\.detail > 1/)
   assert.match(cardClick, /Math\.hypot/)
   assert.match(source, /pointerDownPosition = \{ x: event\.clientX/)
+})
+
+test('opens a prefilled follow-up draft from selected answer text', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const selection = source.slice(source.indexOf('function selectionFollowupTarget'), source.indexOf("app.addEventListener('pointerdown', event => {"))
+  const click = source.slice(source.indexOf("if (button.dataset.action === 'follow-selection')"), source.indexOf("if (button.dataset.action === 'close')"))
+
+  assert.match(source, /class="selection-followup"/)
+  assert.match(selection, /\.thread-answer/)
+  assert.match(selection, /\.message-assistant \.message-body/)
+  assert.match(selection, /text === '' \|\| text\.length > 4000/)
+  assert.match(selection, /text\.length > 4000/)
+  assert.match(click, /openContinue\(thread, undefined, followup\.text\)/)
+  assert.match(source, /state\.draft = \{ kind: 'continue', parentId: parent\.id, anchorId, text, sending: false \}/)
+})
+
+test('renders editable quick phrases in follow-up and branch drafts', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8')
+
+  assert.match(source, /DEFAULT_QUICK_PHRASES = \['展开说明', '举例', '通俗易懂', '对比解释'\]/)
+  assert.match(source, /QUICK_PHRASES_KEY/)
+  assert.match(source, /data-action="insert-quick-phrase"/)
+  assert.match(source, /data-action="open-quick-phrase-editor"/)
+  assert.match(source, /data-action="remove-quick-phrase"/)
+  assert.match(source, /function insertQuickPhrase/)
+  assert.match(source, /persistQuickPhrases\(\)/)
+  assert.match(styles, /\.draft-quick-phrases/)
+  assert.match(styles, /\[data-theme="dark"\] \.draft-quick-phrase/)
 })
 
 test('caches markdown rendering and patches the live card without a full render', async () => {
