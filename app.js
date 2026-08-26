@@ -29,6 +29,10 @@ const CARD_HEIGHT = 276
 const CARD_GAP_Y = 42
 const CAMERA_INSET_X = 56
 const CAMERA_INSET_Y = 56
+// Cards outside the viewport (plus this world-space margin) are not mounted
+// into the DOM; the margin pre-mounts cards just before they scroll into view
+// so panning never flashes empty space.
+const VIEWPORT_MARGIN = 1400
 const state = {
   summaries: [], workspace: null, activeId: null, mode: 'canvas', zoom: 1, currentDsh: null, sidebarCollapsed: false,
   dshWorkspaces: [], selectedDshWorkspaceId: null,
@@ -36,6 +40,7 @@ const state = {
   draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards),
   dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
   expandedMessageIds: new Set(),
+  canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(),
 }
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
@@ -526,17 +531,18 @@ function cacheCardConnectors() {
 function refreshCardConnectors(cardId) {
   const paths = connectorPathsByCard.get(cardId)
   if (paths === undefined || paths.size === 0) return
-  const viewport = document.querySelector('.canvas-viewport')
-  if (!(viewport instanceof HTMLElement)) return
+  const byId = state.canvasCardsById
+  if (byId === undefined) return
   for (const path of paths) {
     const fromId = path.getAttribute('data-from')
     const toId = path.getAttribute('data-to')
     if (fromId === null || toId === null) continue
-    const fromCard = viewport.querySelector(`[data-card-id="${selectorValue(fromId)}"]`)
-    const toCard = viewport.querySelector(`[data-card-id="${selectorValue(toId)}"]`)
-    if (!(fromCard instanceof HTMLElement) || !(toCard instanceof HTMLElement)) continue
-    const nextPath = connectorPathFromElements(fromCard, toCard)
-    if (nextPath !== null) path.setAttribute('d', nextPath)
+    const fromCard = byId.get(fromId)
+    const toCard = byId.get(toId)
+    if (fromCard === undefined || toCard === undefined) continue
+    // Data-driven endpoints: the counterpart card may be unmounted (outside
+    // the viewport) but its position is still authoritative.
+    path.setAttribute('d', connectorPath(fromCard.position, toCard.position))
   }
 }
 
@@ -867,17 +873,70 @@ function draftCard(cards) {
   </article>`
 }
 
+// Cards are mounted into the DOM only when they intersect the viewport
+// (inflated by VIEWPORT_MARGIN) in world coordinates. The camera transform is
+// translate(camera) scale(zoom), so screen = world * zoom + camera.
+function visibleCardIds(cards) {
+  const viewport = document.querySelector('.canvas-viewport')
+  if (!(viewport instanceof HTMLElement)) return new Set(cards.map(card => card.id))
+  const bounds = viewport.getBoundingClientRect()
+  const left = (-state.canvasCamera.x - VIEWPORT_MARGIN) / state.zoom
+  const right = (bounds.width - state.canvasCamera.x + VIEWPORT_MARGIN) / state.zoom
+  const top = (-state.canvasCamera.y - VIEWPORT_MARGIN) / state.zoom
+  const bottom = (bounds.height - state.canvasCamera.y + VIEWPORT_MARGIN) / state.zoom
+  const visible = new Set()
+  for (const card of cards) {
+    const { x, y } = card.position
+    if (x + CARD_WIDTH < left || x > right || y + CARD_HEIGHT < top || y > bottom) continue
+    visible.add(card.id)
+  }
+  return visible
+}
+
+// Incrementally mount cards entering the viewport and unmount cards leaving
+// it, without rebuilding the canvas. Called after pan/zoom/focus camera moves.
+function syncCanvasViewport() {
+  if (state.mode !== 'canvas' || state.canvasCards === undefined) return
+  const layer = document.querySelector('.cards-layer')
+  if (!(layer instanceof HTMLElement)) return
+  const visible = visibleCardIds(state.canvasCards)
+  for (const cardId of [...state.mountedCardIds]) {
+    if (visible.has(cardId)) continue
+    const element = layer.querySelector(`[data-card-id="${selectorValue(cardId)}"]`)
+    if (element instanceof HTMLElement) element.remove()
+    state.mountedCardIds.delete(cardId)
+  }
+  for (const card of state.canvasCards) {
+    if (!visible.has(card.id) || state.mountedCardIds.has(card.id)) continue
+    const wrapper = document.createElement('div')
+    wrapper.innerHTML = conversationCard(card, state.canvasGraph)
+    const element = wrapper.firstElementChild
+    if (element instanceof HTMLElement) {
+      layer.appendChild(element)
+      const handle = element.querySelector('[data-drag-card]')
+      if (handle instanceof HTMLElement) bindDragHandle(handle)
+    }
+    state.mountedCardIds.add(card.id)
+  }
+}
+
 function renderCanvas() {
   const threads = state.workspace?.threads ?? []
   if (threads.length === 0 && state.draft?.kind !== 'new') return `<section class="empty-canvas"><strong>当前工作目录还没有 DSH 对话。</strong><p>点击新会话，在画布中输入第一条消息。</p><div><button class="primary" type="button" data-action="create-session">新建会话</button></div></section>`
   const allCards = conversationCards(threads)
   const graph = conversationGraphView(allCards)
   const cards = graph.cards
+  state.canvasCards = cards
+  state.canvasCardsById = new Map(cards.map(card => [card.id, card]))
+  state.canvasGraph = graph
   if (!state.canvasViewInitialized) {
     state.canvasCamera = initialCanvasCamera(cards)
     state.canvasViewInitialized = true
   }
-  return `<section class="canvas-view"><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><svg class="connectors">${canvasConnectors(cards)}</svg><div class="cards-layer">${cards.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div></section>`
+  const visible = visibleCardIds(cards)
+  state.mountedCardIds = new Set(visible)
+  const mounted = cards.filter(card => visible.has(card.id))
+  return `<section class="canvas-view"><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><svg class="connectors">${canvasConnectors(cards)}</svg><div class="cards-layer">${mounted.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div></section>`
 }
 
 function isProcessMessage(message) {
@@ -973,8 +1032,8 @@ function applyCanvasTransform() {
   if (content instanceof HTMLElement) content.style.transform = `translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})`
 }
 
-function installDragging() {
-  for (const handle of document.querySelectorAll('[data-drag-card]')) handle.addEventListener('pointerdown', event => {
+function bindDragHandle(handle) {
+  handle.addEventListener('pointerdown', event => {
     const cardId = event.currentTarget.dataset.dragCard
     const card = event.currentTarget.closest('.thread-card')
     if (cardId === undefined || !(card instanceof HTMLElement)) return
@@ -991,6 +1050,10 @@ function installDragging() {
       frame = 0
       state.cardPositions.set(cardId, { x: Math.round(position.x), y: Math.round(position.y) })
       for (const alias of aliases) state.cardPositions.set(alias, { x: Math.round(position.x), y: Math.round(position.y) })
+      // Keep the virtualized data object in sync so viewport visibility and
+      // connector paths track the live drag position.
+      const dataCard = state.canvasCardsById?.get(cardId)
+      if (dataCard !== undefined) dataCard.position = { x: position.x, y: position.y }
       card.style.left = `${position.x}px`
       card.style.top = `${position.y}px`
       refreshCardConnectors(cardId)
@@ -1019,6 +1082,10 @@ function installDragging() {
   })
 }
 
+function installDragging() {
+  for (const handle of document.querySelectorAll('[data-drag-card]')) bindDragHandle(handle)
+}
+
 function canvasViewport(target) {
   return target instanceof Element ? target.closest('.canvas-viewport') : null
 }
@@ -1040,9 +1107,11 @@ function zoomCanvas(viewport, nextZoom, clientX, clientY) {
     // zoom-blur bug. will-change re-applies via .is-panning on the next pan.
     content.style.willChange = 'auto'
     applyCanvasTransform()
+    syncCanvasViewport()
     window.requestAnimationFrame(() => { content.style.willChange = '' })
   } else {
     applyCanvasTransform()
+    syncCanvasViewport()
   }
   const label = document.querySelector('.canvas-controls span')
   if (label !== null) label.textContent = `${Math.round(state.zoom * 100)}%`
@@ -1068,6 +1137,7 @@ function focusActiveCard() {
     y: bounds.height / 2 - (top + CARD_HEIGHT / 2) * state.zoom,
   }
   applyCanvasTransform()
+  syncCanvasViewport()
 }
 
 app.addEventListener('pointerdown', event => {
@@ -1086,6 +1156,7 @@ app.addEventListener('pointerdown', event => {
     state.canvasCamera = pendingCamera
     pendingCamera = null
     applyCanvasTransform()
+    syncCanvasViewport()
   }
   const move = moveEvent => {
     pendingCamera = {
