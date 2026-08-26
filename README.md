@@ -18,7 +18,7 @@
 
 把同一工作区中的会话、追问和分支组织成一张可浏览、可拖拽、可缩放的地图，同时保留 DSH 原生会话作为唯一事实来源。
 
-![Synapse 会话地图：链条、分支与追问卡片](docs/images/synapse-ui.png)
+![Synapse 会话地图：链条、分支与追问卡片](docs/images/synapse-map.png)
 
 ## 快速安装
 
