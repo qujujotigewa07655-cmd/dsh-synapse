@@ -49,6 +49,7 @@ jobs:
           fi
 
           version="${tag#v}"
+          package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
           if [[ "${version}" != "${package_version}" ]]; then
             echo "Tag version ${version} does not match package.json version ${package_version}." >&2
@@ -62,8 +63,9 @@ jobs:
           fi
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "package_name=${package_name}" >> "${GITHUB_OUTPUT}"
           echo "dist_tag=${dist_tag}" >> "${GITHUB_OUTPUT}"
-          echo "Publishing dsh-synapse@${version} with npm dist-tag ${dist_tag}."
+          echo "Preparing ${package_name}@${version} with npm dist-tag ${dist_tag}."
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -74,7 +76,19 @@ jobs:
       - name: Run full test suite
         run: pnpm test
 
+      - name: Check npm for an existing version
+        id: npm_registry
+        shell: bash
+        run: |
+          if npm view "${{ steps.release.outputs.package_name }}@${{ steps.release.outputs.version }}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            echo "This version is already published; skipping npm publish."
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Publish package
+        if: steps.npm_registry.outputs.already_published != 'true'
         run: pnpm publish --access public --tag "${{ steps.release.outputs.dist_tag }}" --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
