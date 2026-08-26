@@ -12,6 +12,14 @@
 
 ## 安装
 
+### 从 npm 安装
+
+```powershell
+corepack pnpm dsh plugin --profile web add dsh-synapse
+```
+
+npm 包分发的是预构建产物，无需任何构建授权——最简单的安装方式。下方 GitHub 与本地 checkout 为备选。
+
 ### 从 GitHub 安装
 
 ```powershell

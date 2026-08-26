@@ -38,14 +38,14 @@ Synapse is an interface layer, not a second conversation system. DSH continues t
 Requirements: DeepSeek Harness with the profile plugin mechanism, Node.js `>= 22.19.0`, and the `web` profile.
 
 ```powershell
-corepack pnpm dsh plugin --profile web add github:liangmianya/dsh-synapse
+corepack pnpm dsh plugin --profile web add dsh-synapse
 corepack pnpm dsh web
 ```
 
 Open `http://127.0.0.1:3080/` and select **Session Map / 会话地图** from the top switch.
 
 > [!NOTE]
-> Synapse extends the existing DSH Web profile. It does not start a second application server. If pnpm blocks the Git dependency's build script, follow the exact `allowBuilds` instructions in the installation guide.
+> Synapse extends the existing DSH Web profile. It does not start a second application server. The npm package needs no build permission; Git and local-checkout installs are documented in the installation guide.
 
 ## Documentation
 

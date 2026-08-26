@@ -12,6 +12,14 @@ The plugin does not replace DSH models, tools, sessions, permissions, or the Web
 
 ## Installation
 
+### Install from npm
+
+```powershell
+corepack pnpm dsh plugin --profile web add dsh-synapse
+```
+
+The npm package ships prebuilt code, so no build-script permission is needed — the simplest install. GitHub and local-checkout routes below are alternatives.
+
 ### Install from GitHub
 
 ```powershell
@@ -129,9 +137,16 @@ A leftover `allowBuilds` key in `pnpm-workspace.yaml` is harmless and may also b
 - Deleting `workspaces.json` loses canvas layout, never DSH sessions.
 - Projected message text is capped at 8000 characters; longer card text ends with “—…（详情查看全文）”, while the full content remains available in conversation details.
 - The plugin starts no second Web server and creates no second agent system.
-- It reads committed session events only and does not change model requests, system prompts, tool schemas, or reusable KV-cache prefixes.
 
 See [Architecture and runtime boundaries](../architecture.md) for details.
+
+## Model Experience
+
+None, as dsh-synapse only reads committed session events and renders them; it adds no system-prompt prose, tool schemas, or request-context content to any model request.
+
+### KV Cache effect
+
+Does not invalidate. The plugin never changes request headers, system prompts, or tool registries, so an already-reusable KV prefix stays reusable; canvas projection consumes session logs only after they are committed.
 
 ## Known limitations
 
