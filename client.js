@@ -145,6 +145,30 @@ window.__ModuleLoader__.load({
         }
         if (event.data.type === 'synapse:open-session') {
           try { ctx.sessions.open(event.data.sessionId); close() } catch { send('synapse:bridge-error', { message: '关联的 DSH 会话已不可用' }) }
+          // Best-effort anchor to the requested turn: chat nodes expose their
+          // source event seq (anchorSeq) and render with data-chat-anchor-key,
+          // so resolve seq -> node key -> scroll once the view materializes.
+          const seq = event.data.seq
+          if (Number.isInteger(seq)) {
+            const tryScroll = attempt => {
+              const scope = ctx.sessions.scope(event.data.sessionId)
+              const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
+              if (session === undefined) return
+              const chat = session.getSnapshot()?.chat
+              if (chat === undefined) return
+              let key = undefined
+              for (const node of chat.nodes.values()) {
+                if (node.anchorSeq === seq) { key = node.key; break }
+              }
+              if (key !== undefined) {
+                const row = document.querySelector(`[data-chat-anchor-key="${CSS.escape(key)}"]`)
+                if (row instanceof HTMLElement) row.scrollIntoView({ block: 'start' })
+                return
+              }
+              if (attempt < 3) window.setTimeout(() => tryScroll(attempt + 1), 500)
+            }
+            window.setTimeout(() => tryScroll(0), 300)
+          }
           return
         }
         if (event.data.type === 'synapse:activate-session') {

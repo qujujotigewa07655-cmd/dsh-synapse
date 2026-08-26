@@ -22,12 +22,17 @@ test('reuses the live map iframe and retries initialization only after iframe lo
   assert.match(open, /overlay\.classList\.add\('is-opening'\)/)
 })
 
-test('recenters the canvas whenever the map view is reopened', async () => {
+test('keeps the canvas viewport across dialog/map toggles and recenters on real session switches', async () => {
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
   const mapOpened = source.slice(source.indexOf("if (data.type === 'synapse:map-opened')"), source.indexOf("if (data.type === 'synapse:workspaces')"))
+  const currentSession = source.slice(source.indexOf("if (data.type === 'synapse:current-session')"), source.indexOf("if (data.type === 'synapse:live-reply'"))
 
-  assert.match(mapOpened, /resetCanvasCamera\(\)/)
+  // Reopening the map for the same session must NOT reset the camera: only a
+  // real session switch (current-session id change) re-centers the canvas.
+  assert.doesNotMatch(mapOpened, /resetCanvasCamera\(\)/)
   assert.match(mapOpened, /state\.mode = 'canvas'\s+render\(\)/)
+  assert.match(currentSession, /previousId !== data\.session\?\.id/)
+  assert.match(currentSession, /focusActiveCard\(\)/)
 })
 
 test('lets the card answer scroll with the native wheel instead of adding deltaY', async () => {

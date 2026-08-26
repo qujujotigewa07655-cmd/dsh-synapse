@@ -40,7 +40,8 @@ const state = {
   draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards),
   dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 },
   expandedMessageIds: new Set(),
-  canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(),
+  canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(), canvasNeedsCenter: false,
+  detailScrollByThread: new Map(), detailThreadId: null, detailTargetCardId: null,
 }
 
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
@@ -237,6 +238,8 @@ async function archiveThread(thread) {
   if (!window.confirm(`归档画布中的「${thread.title}」及其分支？DSH 原会话会保留，可在 DSH 内继续查看。`)) return
   await api(`/synapse/api/threads/${thread.id}`, { method: 'DELETE' })
   state.historyBySession.delete(thread.dshSessionId)
+  state.detailScrollByThread.delete(thread.id)
+  state.detailTargetCardId = state.detailThreadId === thread.id ? null : state.detailTargetCardId
   if (state.workspace !== null) {
     const removed = new Set([thread.id])
     for (let changed = true; changed;) {
@@ -548,7 +551,10 @@ function refreshCardConnectors(cardId) {
 
 function initialCanvasCamera(cards) {
   const draft = state.draft?.kind === 'new' ? { id: 'draft:new', position: { x: 86, y: 82 } } : draftPlacement(cards)
-  const active = state.activeId === null ? undefined : cards.find(card => card.dshThreadId === state.activeId)
+  // Focus the active conversation's latest turn, not its first: after many
+  // rounds the canvas should open where work is happening, at the newest card.
+  const activeCards = state.activeId === null || state.activeId === undefined ? [] : cards.filter(card => card.dshThreadId === state.activeId)
+  const active = activeCards.at(-1)
   const focus = draft ?? active ?? cards[0]
   const position = focus?.position
   if (position === undefined) return { x: 0, y: 0 }
@@ -836,10 +842,10 @@ function conversationCard(card, graph) {
   return `<article class="thread-card ${active}" data-card-id="${escapeHtml(card.id)}" data-position-key="${escapeHtml(card.positionKey)}" data-thread="${card.dshThreadId}" style="left:${card.position.x}px;top:${card.position.y}px;--thread-color:#3478f6">
     <button class="node-handle" data-drag-card="${card.id}" aria-label="拖动 ${escapeHtml(card.question)}" title="拖动卡片"></button>
     ${continueButton}${foldButton}${branchButton}
-    <div class="thread-card-head"><span class="topic-dot"></span><button class="thread-title" data-action="show-thread" data-thread="${card.dshThreadId}" title="查看完整会话：${escapeHtml(card.question)}">${escapeHtml(card.question)}</button></div>
+    <div class="thread-card-head"><span class="topic-dot"></span><button class="thread-title" data-action="show-thread" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" title="查看完整会话：${escapeHtml(card.question)}">${escapeHtml(card.question)}</button></div>
     <div class="thread-meta"><span>${source}</span><span>第 ${card.turnIndex + 1} 轮</span></div>
     <div class="thread-answer">${card.answer === null ? '<p class="thread-answer-empty">等待助手回复</p>' : card.answer.pending && card.answer.text === '' ? '<p class="thread-answer-pending">正在回复</p>' : `${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="thread-answer-pending">正在回复</p>' : ''}`}</div>
-    <footer><button data-action="show-thread" data-thread="${card.dshThreadId}">详情</button><button data-action="open-dsh" data-thread="${card.dshThreadId}">打开 DSH</button><button data-action="archive-thread" data-thread="${card.dshThreadId}">归档</button></footer>
+    <footer><button data-action="show-thread" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" title="查看完整会话" aria-label="查看完整会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 8.5 8 2.5l6 6V13.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5Z"/><path d="M6.2 14v-3.6a1.8 1.8 0 0 1 3.6 0V14" /></svg>详情</button><button data-action="open-dsh" data-thread="${card.dshThreadId}" data-seq="${Number.isInteger(card.sourceSeq) ? card.sourceSeq : ''}" title="在 DSH 中打开" aria-label="在 DSH 中打开"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4.5A1.5 1.5 0 0 0 3 5v6.5A1.5 1.5 0 0 0 4.5 13H11a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M9.5 3.5h3v3M12.4 3.6 7.5 8.5"/></svg>DSH</button><button data-action="archive-thread" data-thread="${card.dshThreadId}" title="归档此会话" aria-label="归档此会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5h11M5.5 7v5.5a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1V7"/><path d="M4 5 5 2.8a.7.7 0 0 1 .6-.4h4.8a.7.7 0 0 1 .6.4L12 5M6 9.5h4"/></svg>归档</button></footer>
   </article>`
 }
 
@@ -932,6 +938,9 @@ function renderCanvas() {
   if (!state.canvasViewInitialized) {
     state.canvasCamera = initialCanvasCamera(cards)
     state.canvasViewInitialized = true
+    // The viewport is not laid out yet while renderCanvas builds its HTML;
+    // center the focused card once the DOM is mounted (render tail).
+    state.canvasNeedsCenter = true
   }
   const visible = visibleCardIds(cards)
   state.mountedCardIds = new Set(visible)
@@ -962,7 +971,7 @@ function threadMessage(thread, message) {
   const body = message.pending && message.text === '' ? '<p class="message-streaming"><span class="streaming-dot"></span>正在回复</p>'
     : `${collapsible && !expanded ? `<p class="message-summary">${escapeHtml(processSummary(message.text))}</p>` : renderMarkdown(message.text)}${message.pending ? '<p class="message-streaming"><span class="streaming-dot"></span>正在回复</p>' : ''}${process === null ? '' : processRecords(process, messageId)}`
   const avatar = isUser ? '' : '<span class="message-avatar" aria-hidden="true"></span>'
-  return `<article class="message message-${message.kind}${message.pending ? ' message-pending' : ''}${collapsible ? ' message-collapsible' : ''}${expanded ? ' expanded' : ''}"><header>${avatar}<span class="message-role">${label}</span><time>${formatTime(message.at)}</time>${branch}${fold}</header><div class="message-body">${body}</div></article>`
+  return `<article class="message message-${message.kind}${message.pending ? ' message-pending' : ''}${collapsible ? ' message-collapsible' : ''}${expanded ? ' expanded' : ''}" data-message-seq="${Number.isInteger(message.sourceSeq) ? message.sourceSeq : ''}"><header>${avatar}<span class="message-role">${label}</span><time>${formatTime(message.at)}</time>${branch}${fold}</header><div class="message-body">${body}</div></article>`
 }
 
 function processRecords(process, messageId) {
@@ -984,12 +993,20 @@ function renderThread() {
   if (thread === null) return renderCanvas()
   const messages = messagesFor(thread)
   const waiting = state.pendingReplies.has(thread.dshSessionId)
-  return `<section class="detail-view"><header class="detail-head"><div class="detail-head-title"><div class="detail-head-meta"><span class="detail-badge">${thread.parentId === null ? '会话' : '分支'}</span>${thread.dshSessionTitle ?? thread.title ? `<span class="detail-subtitle">${escapeHtml(thread.dshSessionTitle ?? thread.title)}</span>` : ''}</div><h1>${escapeHtml(questionFor(thread))}</h1></div><div class="detail-head-actions"><button data-action="open-dsh" data-thread="${thread.id}" title="在原生对话中打开此会话">在 DSH 中打开</button><button data-action="open-branch" data-thread="${thread.id}" title="基于最新回答创建分支">创建分支</button><button class="primary" data-action="show-canvas">返回画布</button></div></header><div class="detail-scroll">${messages.map(message => threadMessage(thread, message)).join('') || '<div class="note-empty">等待这条会话的第一条消息。</div>'}</div><form class="message-composer" data-compose="${thread.id}"><textarea maxlength="4000" placeholder="继续当前会话…" ${waiting ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${waiting ? 'disabled' : ''}>${waiting ? '等待回复' : '发送'}</button></form></section>`
+  const latestAssistantSeq = [...messages].reverse().find(message => Number.isInteger(message.sourceSeq))?.sourceSeq
+  return `<section class="detail-view"><header class="detail-head"><div class="detail-head-title"><div class="detail-head-meta"><span class="detail-badge">${thread.parentId === null ? '会话' : '分支'}</span>${thread.dshSessionTitle ?? thread.title ? `<span class="detail-subtitle">${escapeHtml(thread.dshSessionTitle ?? thread.title)}</span>` : ''}</div><h1>${escapeHtml(questionFor(thread))}</h1></div><div class="detail-head-actions"><button data-action="open-dsh" data-thread="${thread.id}" data-seq="${Number.isInteger(latestAssistantSeq) ? latestAssistantSeq : ''}" title="在原生对话中打开此会话">在 DSH 中打开</button><button data-action="open-branch" data-thread="${thread.id}" title="基于最新回答创建分支">创建分支</button><button class="primary" data-action="show-canvas">返回画布</button></div></header><div class="detail-scroll">${messages.map(message => threadMessage(thread, message)).join('') || '<div class="note-empty">等待这条会话的第一条消息。</div>'}</div><form class="message-composer" data-compose="${thread.id}"><textarea maxlength="4000" placeholder="继续当前会话…" ${waiting ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${waiting ? 'disabled' : ''}>${waiting ? '等待回复' : '发送'}</button></form></section>`
 }
 
 function render() {
-  const detail = state.mode === 'thread' ? document.querySelector('.detail-scroll') : null
-  const detailScrollTop = detail instanceof HTMLElement ? detail.scrollTop : null
+  // Remember the departing thread's scroll position per thread id, so
+  // switching sessions restores each conversation's own place instead of
+  // smearing one session's position onto another.
+  if (state.mode === 'thread' && state.detailThreadId !== null) {
+    const detail = document.querySelector('.detail-scroll')
+    if (detail instanceof HTMLElement) state.detailScrollByThread.set(state.detailThreadId, detail.scrollTop)
+  }
+  state.detailThreadId = state.mode === 'thread' ? state.activeId : null
+  const detailScrollTop = state.detailThreadId === null ? null : state.detailScrollByThread.get(state.detailThreadId) ?? null
   const cardScrollTops = new Map()
   if (state.mode === 'canvas') {
     // Key by the unique card id: every card of a session shares data-thread,
@@ -1007,12 +1024,18 @@ function render() {
   const view = state.mode === 'thread' ? renderThread() : renderCanvas()
   const choices = workspaceChoices()
   const selectedWorkspaceId = state.selectedDshWorkspaceId ?? workspace?.id
-  const canvasControls = state.mode === 'canvas' && (threads.length > 0 || state.draft?.kind === 'new') ? `<div class="canvas-controls"><button data-action="layout">整理节点</button><button data-action="focus-active" title="定位到当前会话">定位</button><button data-action="zoom-out" aria-label="缩小">-</button><span>${Math.round(state.zoom * 100)}%</span><button data-action="zoom-in" aria-label="放大">+</button></div>` : ''
+  const canvasControls = state.mode === 'canvas' && (threads.length > 0 || state.draft?.kind === 'new') ? `<div class="canvas-controls"><button data-action="layout" title="整理节点" aria-label="整理节点"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>整理</button><button data-action="focus-active" title="定位到当前会话" aria-label="定位到当前会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.5v2.6M8 11.9v2.6M1.5 8h2.6M11.9 8h2.6"/></svg>定位</button><button data-action="zoom-out" aria-label="缩小" title="缩小"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button><span>${Math.round(state.zoom * 100)}%</span><button data-action="zoom-in" aria-label="放大" title="放大"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg></button></div>` : ''
   const detailAvailable = currentThread() !== null
   const canvasTabs = `<nav class="canvas-tabs" aria-label="会话地图视图"><button class="${state.mode === 'canvas' ? 'active' : ''}" data-action="show-canvas">地图</button><button class="${state.mode === 'thread' ? 'active' : ''}" data-action="show-thread" data-thread="${state.activeId ?? ''}" ${detailAvailable ? '' : 'disabled'}>详情</button></nav>`
   app.innerHTML = `<main class="synapse-shell ${state.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside class="sidebar"><div class="sidebar-brand-row"><div class="brand" aria-label="Synapse"><svg class="brand-mark" aria-hidden="true" viewBox="0 0 32 32" fill="none"><path d="M9 10.5 16 7l7 3.5M9 10.5v8L16 22m0-15v15m7-11.5v8L16 22"/><circle cx="9" cy="10" r="2.5"/><circle cx="23" cy="10" r="2.5"/><circle cx="16" cy="23" r="2.5"/></svg><strong>Synapse</strong></div><button class="sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}" title="${state.sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="1.75" width="12.5" height="12.5" rx="2.25"/><path d="M6 2v12"/></svg></button></div><button class="new-workspace" type="button" data-action="create-session" ${state.draft !== null ? 'disabled' : ''}><svg class="new-session-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.75v6.5M4.75 8h6.5"/></svg><span>新会话</span></button><label class="workspace-label"><span>工作区</span><span class="workspace-select"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 4.75h3l1.2 1.5h6.8v5.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1Z"/></svg><select data-action="select-workspace" aria-label="选择工作区" ${state.draft !== null ? 'disabled' : ''}>${choices.map(item => `<option value="${item.id}" title="${escapeHtml(item.path ?? item.title)}" ${item.id === selectedWorkspaceId ? 'selected' : ''}>${escapeHtml(item.title)}</option>`).join('')}</select></span></label><div class="sidebar-heading"><span>会话</span></div><nav class="thread-tree">${threads.map(thread => `<button class="tree-row ${thread.id === state.activeId ? 'active' : ''}" data-action="select-thread" data-thread="${thread.id}" style="--thread-color:#374151"><span class="tree-dot"></span><span>${escapeHtml(threadListTitle(thread))}</span>${thread.parentId === null ? '' : '<i>分支</i>'}</button>`).join('') || '<p class="tree-empty">暂未同步会话</p>'}</nav></aside><header class="topbar"><div class="view-switch" role="group" aria-label="视图切换"><button data-action="close" type="button" aria-pressed="false">对话</button><button class="active" type="button" aria-pressed="true">会话地图</button></div>${canvasControls}</header><section class="main-stage">${state.error ? `<div class="status-message" role="alert"><span>${escapeHtml(state.error)}</span><button data-action="dismiss-error" aria-label="关闭" title="关闭">×</button></div>` : ''}${canvasTabs}${view}</section></main>`
   installDragging()
   cacheCardConnectors()
+  // The initial camera from renderCanvas is inset (viewport not laid out yet);
+  // center it on the focused card once the canvas DOM is mounted.
+  if (state.canvasNeedsCenter) {
+    state.canvasNeedsCenter = false
+    window.requestAnimationFrame(() => { if (state.mode === 'canvas') focusActiveCard() })
+  }
   for (const [cardId, scrollTop] of cardScrollTops) {
     const answer = app.querySelector(`.thread-card[data-card-id="${CSS.escape(cardId)}"] .thread-answer`)
     if (answer instanceof HTMLElement) answer.scrollTop = scrollTop
@@ -1021,6 +1044,19 @@ function render() {
     const nextDetail = document.querySelector('.detail-scroll')
     if (nextDetail instanceof HTMLElement) nextDetail.scrollTop = detailScrollTop
   })
+  // Jump the detail view to the card the user clicked: card ids carry the
+  // source sequence (`<thread>:turn:<seq>`), which matches data-message-seq
+  // anchors on the rendered messages.
+  const targetCardId = state.detailTargetCardId
+  state.detailTargetCardId = null
+  if (targetCardId !== null) {
+    const match = /:turn:(\d+)$/.exec(targetCardId)
+    const seq = match === null ? null : match[1]
+    if (seq !== null) window.requestAnimationFrame(() => {
+      const target = app.querySelector(`[data-message-seq="${CSS.escape(seq)}"]`)
+      if (target instanceof HTMLElement) target.scrollIntoView({ block: 'start' })
+    })
+  }
 }
 
 function renderPreservingDetailScroll() {
@@ -1125,12 +1161,18 @@ function zoomCanvasAtCenter(delta) {
 }
 
 function focusActiveCard() {
-  const card = document.querySelector('.thread-card.active') ?? document.querySelector('.thread-card[data-thread]:not(.draft-card)')
   const viewport = document.querySelector('.canvas-viewport')
-  if (!(card instanceof HTMLElement) || !(viewport instanceof HTMLElement)) return
-  const left = Number.parseFloat(card.style.left)
-  const top = Number.parseFloat(card.style.top)
-  if (!Number.isFinite(left) || !Number.isFinite(top)) return
+  if (!(viewport instanceof HTMLElement)) return
+  const cards = state.canvasCards
+  if (cards === undefined || cards.length === 0) return
+  // Drafts win over the active conversation's latest turn; fall back to the
+  // first card. Cards may be unmounted (outside the viewport), so the focus
+  // target comes from the data model, never from DOM queries.
+  const draft = state.draft === null ? undefined
+    : state.draft.kind === 'new' ? { position: { x: 86, y: 82 } } : draftPlacement(cards)
+  const activeCards = state.activeId === null || state.activeId === undefined ? [] : cards.filter(card => card.dshThreadId === state.activeId)
+  const card = draft ?? activeCards.at(-1) ?? cards[0]
+  const { x: left, y: top } = card.position
   const bounds = viewport.getBoundingClientRect()
   state.canvasCamera = {
     x: bounds.width / 2 - (left + CARD_WIDTH / 2) * state.zoom,
@@ -1245,7 +1287,7 @@ app.addEventListener('click', async event => {
       // without closing the map; the client confirms via synapse:current-session.
       if (thread.dshSessionId !== null) post('synapse:activate-session', { sessionId: thread.dshSessionId })
     }
-    if (button.dataset.action === 'show-thread' && thread !== undefined) { state.activeId = thread.id; state.mode = 'thread'; render(); void loadThreadHistory(thread) }
+    if (button.dataset.action === 'show-thread' && thread !== undefined) { state.activeId = thread.id; state.mode = 'thread'; state.detailTargetCardId = button.dataset.card ?? null; render(); void loadThreadHistory(thread) }
     if (button.dataset.action === 'show-canvas') { state.mode = 'canvas'; render() }
     if (button.dataset.action === 'toggle-card-children' && button.dataset.card !== undefined) {
       const cardId = button.dataset.card
@@ -1273,7 +1315,7 @@ app.addEventListener('click', async event => {
     }
     if (button.dataset.action === 'cancel-draft') { state.draft = null; render() }
     if (button.dataset.action === 'toggle-message' && button.dataset.message !== undefined) { state.expandedMessageIds.has(button.dataset.message) ? state.expandedMessageIds.delete(button.dataset.message) : state.expandedMessageIds.add(button.dataset.message); renderPreservingDetailScroll() }
-    if (button.dataset.action === 'open-dsh' && thread?.dshSessionId !== null) post('synapse:open-session', { sessionId: thread.dshSessionId })
+    if (button.dataset.action === 'open-dsh' && thread?.dshSessionId !== null) post('synapse:open-session', { sessionId: thread.dshSessionId, seq: Number.isInteger(Number(button.dataset.seq)) ? Number(button.dataset.seq) : undefined })
     if (button.dataset.action === 'archive-thread' && thread !== undefined) await archiveThread(thread)
     if (button.dataset.action === 'zoom-in') zoomCanvasAtCenter(.1)
     if (button.dataset.action === 'zoom-out') zoomCanvasAtCenter(-.1)
@@ -1323,7 +1365,10 @@ window.addEventListener('message', event => {
   if (event.origin !== window.location.origin || event.data?.source !== 'dsh-synapse') return
   const data = event.data
   if (data.type === 'synapse:map-opened') {
-    resetCanvasCamera()
+    // Do NOT reset the camera here: toggling dialog<->map for the same
+    // session must keep the user's viewport. A fresh canvas (canvasView
+    // not initialized) still centers via renderCanvas; a real session switch
+    // re-centers in the current-session handler below.
     state.mode = 'canvas'
     render()
     window.requestAnimationFrame(() => post('synapse:map-ready'))
@@ -1346,7 +1391,14 @@ window.addEventListener('message', event => {
       state.activeId = thread.id
       if (state.workspace !== null) revealConversationThread(conversationCards(state.workspace.threads), thread.id)
     }
-    if (previousId !== data.session?.id) void openCurrentWorkspace().then(opened => { if (!opened && canReplaceView()) render() }).catch(setError)
+    if (previousId !== data.session?.id) {
+      // A real session switch: re-center on the new session's latest turn,
+      // whether it lives in the same workspace (openCurrentWorkspace returns
+      // false) or a different one (it resets the camera itself).
+      void openCurrentWorkspace().then(opened => {
+        if (!opened && canReplaceView()) { render(); focusActiveCard() }
+      }).catch(setError)
+    }
     else if (canReplaceView()) render()
   }
   if (data.type === 'synapse:live-reply' && typeof data.sessionId === 'string') {
