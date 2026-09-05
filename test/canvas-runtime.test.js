@@ -220,7 +220,7 @@ test('renders editable quick phrases in follow-up and branch drafts', async () =
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
   const styles = await readFile(new URL('../styles.css', import.meta.url), 'utf8')
 
-  assert.match(source, /DEFAULT_QUICK_PHRASES = \['展开说明', '举例', '通俗易懂', '对比解释'\]/)
+  assert.match(source, /DEFAULT_QUICK_PHRASES = \['Elaborate', 'Examples', 'Explain simply', 'Compare'\]/)
   assert.match(source, /QUICK_PHRASES_KEY/)
   assert.match(source, /data-action="insert-quick-phrase"/)
   assert.match(source, /data-action="open-quick-phrase-editor"/)
@@ -248,7 +248,7 @@ test('renders a follow-up plus on final cards and fold plus branch controls on n
 
   assert.match(card, /class="graph-continue-button"/)
   assert.match(card, /data-action="open-continue"/)
-  assert.match(card, /aria-label="添加追问"/)
+  assert.match(card, /aria-label="Add follow-up"/)
   assert.match(card, /childCount === 0 \|\| card\.canContinue === true \? ''/)
   assert.match(card, /class="graph-fold-button/)
   assert.match(card, /data-action="toggle-card-children"/)
@@ -257,10 +257,10 @@ test('renders a follow-up plus on final cards and fold plus branch controls on n
   assert.match(card, /M8 3\.5v9/)
   assert.match(card, /childCount === 0 \|\| card\.canContinue === true \|\| !Number\.isInteger\(card\.answer\?\.sourceSeq\)/)
   assert.match(card, /class="graph-branch-button"/)
-  assert.match(card, /aria-label="在新对话中分支"/)
+  assert.match(card, /aria-label="Branch in a new conversation"/)
   assert.match(card, /M13\.0762 1\.37207C14\.0846/)
-  assert.doesNotMatch(card, />追问<\/button>/)
-  assert.doesNotMatch(card, />分支<\/button>/)
+  assert.doesNotMatch(card, />Follow-up<\/button>/)
+  assert.doesNotMatch(card, />Branch<\/button>/)
   assert.doesNotMatch(card, /class="branch-button"/)
 })
 
@@ -302,8 +302,8 @@ test('prevents collapse from hiding drafts or the active conversation and restor
 
   assert.match(toggle, /const visibleCards = conversationGraphView\(allCards, nextCollapsed\)\.cards/)
   assert.match(toggle, /draftPlacement\(allCards\)\?\.parent\.id/)
-  assert.match(toggle, /请先完成或取消正在编辑的追问或分支/)
-  assert.match(toggle, /当前会话位于这个后续分支中/)
+  assert.match(toggle, /Finish or cancel the follow-up or branch you are editing first/)
+  assert.match(toggle, /The current session is inside this follow-up branch/)
   assert.match(toggle, /window\.setTimeout/)
   assert.match(toggle, /\.focus\(\)/)
 })

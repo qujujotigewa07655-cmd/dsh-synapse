@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
       const accounted = new Set(snapshot.items.flatMap(workspace => workspace.sessionIds))
       return [
         ...snapshot.items.map(workspace => ({ id: workspace.workspaceId, title: workspace.title, path: workspace.path, sessionIds: workspace.sessionIds })),
-        { id: 'dsh-ungrouped', title: '未分组', path: null, sessionIds: sessions.ids.filter(id => !accounted.has(id)) },
+        { id: 'dsh-ungrouped', title: 'Ungrouped', path: null, sessionIds: sessions.ids.filter(id => !accounted.has(id)) },
       ]
     }
 
@@ -31,16 +31,16 @@ window.__ModuleLoader__.load({
       const prompt = async (sessionId, text) => {
         const scope = ctx.sessions.scope(sessionId)
         const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
-        if (session === undefined) throw new Error('关联的 DSH 会话已不可用')
+        if (session === undefined) throw new Error('The linked DSH session is no longer available')
         const result = await session.prompt([{ type: 'text', text }], 'queue')
-        if (!result.ok) throw new Error(result.error?.message ?? 'DSH 未接受这条消息')
+        if (!result.ok) throw new Error(result.error?.message ?? 'DSH did not accept this message')
       }
       const style = document.createElement('style')
       style.textContent = '.dsh-synapse-switch{position:fixed;z-index:80;top:12px;left:50%;display:flex;gap:2px;transform:translateX(-50%);border:1px solid #d1d5db;border-radius:999px;background:rgba(255,255,255,.96);padding:3px;backdrop-filter:blur(10px)}.dsh-synapse-switch button{height:28px;border:0;border-radius:999px;background:transparent;padding:0 11px;color:#6b7280;font:600 12px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}.dsh-synapse-switch button:hover{background:#f3f4f6;color:#111827}.dsh-synapse-switch button.active{background:#111827;color:#fff}.dsh-synapse-switch button:focus-visible{outline:2px solid #111827;outline-offset:2px}.dsh-synapse-overlay{position:fixed;z-index:100;inset:0;background:#f5f7fa}.dsh-synapse-overlay.is-opening{visibility:hidden}.dsh-synapse-overlay[hidden]{display:none}.dsh-synapse-overlay iframe{display:block;width:100%;height:100%;border:0}'
       document.head.append(style)
       const host = document.createElement('div')
       host.className = 'dsh-synapse-host'
-      host.innerHTML = '<div class="dsh-synapse-switch" role="group" aria-label="视图切换"><button type="button" data-view="dialog" class="active" aria-pressed="true">对话</button><button type="button" data-view="map" aria-pressed="false">会话地图</button></div><section class="dsh-synapse-overlay" hidden><iframe title="会话地图" src="/synapse/"></iframe></section>'
+      host.innerHTML = '<div class="dsh-synapse-switch" role="group" aria-label="View switch"><button type="button" data-view="dialog" class="active" aria-pressed="true">Chat</button><button type="button" data-view="map" aria-pressed="false">Conversation map</button></div><section class="dsh-synapse-overlay" hidden><iframe title="Conversation map" src="/synapse/"></iframe></section>'
       document.body.append(host)
       const dialogButton = host.querySelector('[data-view="dialog"]')
       const mapButton = host.querySelector('[data-view="map"]')
@@ -144,7 +144,7 @@ window.__ModuleLoader__.load({
           return send('synapse:current-session', { session: currentSession(ctx) })
         }
         if (event.data.type === 'synapse:open-session') {
-          try { ctx.sessions.open(event.data.sessionId); close() } catch { send('synapse:bridge-error', { message: '关联的 DSH 会话已不可用' }) }
+          try { ctx.sessions.open(event.data.sessionId); close() } catch { send('synapse:bridge-error', { message: 'The linked DSH session is no longer available' }) }
           // Best-effort anchor to the requested turn: chat nodes expose their
           // source event seq (anchorSeq) and render with data-chat-anchor-key,
           // so resolve seq -> node key -> scroll once the view materializes.
@@ -175,24 +175,24 @@ window.__ModuleLoader__.load({
           // Bidirectional current-session sync: switch DSH's current session
           // without closing the map; the sessions-list subscription re-sends
           // synapse:current-session so the map follows the new highlight.
-          try { ctx.sessions.open(event.data.sessionId) } catch { send('synapse:bridge-error', { message: '关联的 DSH 会话已不可用' }) }
+          try { ctx.sessions.open(event.data.sessionId) } catch { send('synapse:bridge-error', { message: 'The linked DSH session is no longer available' }) }
           return
         }
         if (event.data.type === 'synapse:fork-session') {
           const atSeq = Number.isInteger(event.data.atSeq) ? event.data.atSeq : undefined
           ctx.sessions.fork({ sessionId: event.data.sessionId, atSeq, increaseTitle: true }).then(id => {
             const snapshot = ctx.sessions.list.getSnapshot()
-            send('synapse:forked-session', { requestId: event.data.requestId, session: { id, title: snapshot.byId[id]?.displayTitle ?? 'DSH 分支' } })
-          }).catch(() => { send('synapse:bridge-error', { message: 'DSH 分支创建失败，请确认源会话已经完成当前轮次' }) })
+            send('synapse:forked-session', { requestId: event.data.requestId, session: { id, title: snapshot.byId[id]?.displayTitle ?? 'DSH Branch' } })
+          }).catch(() => { send('synapse:bridge-error', { message: 'Failed to create the DSH branch — make sure the source session finished its current turn' }) })
           return
         }
         if (event.data.type === 'synapse:send-message') {
           const text = typeof event.data.text === 'string' ? event.data.text.trim() : ''
-          if (text === '') return send('synapse:bridge-error', { requestId: event.data.requestId, message: '消息不能为空' })
+          if (text === '') return send('synapse:bridge-error', { requestId: event.data.requestId, message: 'Message cannot be empty' })
           prompt(event.data.sessionId, text).then(() => {
             send('synapse:message-sent', { requestId: event.data.requestId, sessionId: event.data.sessionId })
           }).catch(error => {
-            send('synapse:bridge-error', { requestId: event.data.requestId, message: error instanceof Error ? error.message : 'DSH 消息发送失败' })
+            send('synapse:bridge-error', { requestId: event.data.requestId, message: error instanceof Error ? error.message : 'Failed to send the message to DSH' })
           })
           return
         }
@@ -202,8 +202,8 @@ window.__ModuleLoader__.load({
           const create = workspaceId === undefined ? ctx.sessions.create(cwd === undefined ? {} : { cwd }) : ctx.sessions.create({ workspaceId })
           create.then(id => {
             const snapshot = ctx.sessions.list.getSnapshot()
-            send('synapse:created-session', { requestId: event.data.requestId, session: { id, title: snapshot.byId[id]?.displayTitle ?? '新会话', cwd: snapshot.byId[id]?.cwd ?? cwd ?? null } })
-          }).catch(() => { send('synapse:bridge-error', { requestId: event.data.requestId, message: 'DSH 会话创建失败，请先在 DSH 选择工作目录' }) })
+            send('synapse:created-session', { requestId: event.data.requestId, session: { id, title: snapshot.byId[id]?.displayTitle ?? 'New session', cwd: snapshot.byId[id]?.cwd ?? cwd ?? null } })
+          }).catch(() => { send('synapse:bridge-error', { requestId: event.data.requestId, message: 'Failed to create the DSH session — choose a working directory in DSH first' }) })
         }
       }
       const onKeyDown = event => { if (event.key === 'Escape' && !overlay.hidden) close() }

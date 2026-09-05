@@ -11,7 +11,7 @@ const MAX_NOTE_LENGTH = 4_000
 // Projected message text cap: longer replies truncate with a marker pointing
 // at the detail view instead of silently cutting mid-sentence.
 const MAX_PROJECTION_LENGTH = 8_000
-const PROJECTION_TRUNCATED_SUFFIX = '\n——…（详情查看全文）'
+const PROJECTION_TRUNCATED_SUFFIX = '\n — … (see the full text for details)'
 const TOPIC_COLORS = ['#0f766e', '#2563eb', '#be123c', '#7c3aed', '#b45309']
 const LOCK_STALE_MS = 60_000
 // Deferred (event-projection) writes coalesce into one save per window, so a
@@ -68,7 +68,7 @@ export class WorkspaceStore {
         now,
         order: workspace.threads.length,
       })
-      if (thread.parentId !== null && !workspace.threads.some(item => item.id === thread.parentId)) throw new InputError('分支来源不存在')
+      if (thread.parentId !== null && !workspace.threads.some(item => item.id === thread.parentId)) throw new InputError('Branch source does not exist')
       workspace.threads.push(thread)
       workspace.updatedAt = now
       return structuredClone(thread)
@@ -113,8 +113,8 @@ export class WorkspaceStore {
   /** Keep only the canvas graph in Synapse; DSH remains the source of session truth. */
   async syncSessions(sessions, removedSessionIds = []) {
     return this.mutate(() => {
-      if (!Array.isArray(sessions)) throw new InputError('sessions 必须是数组')
-      if (!Array.isArray(removedSessionIds) || removedSessionIds.some(item => typeof item !== 'string')) throw new InputError('removedSessionIds 必须是字符串数组')
+      if (!Array.isArray(sessions)) throw new InputError('sessions must be an array')
+      if (!Array.isArray(removedSessionIds) || removedSessionIds.some(item => typeof item !== 'string')) throw new InputError('removedSessionIds must be an array of strings')
       const blankIds = new Set(sessions.filter(item => item?.blank === true && typeof item.id === 'string').map(item => item.id))
       const removedIds = new Set(removedSessionIds)
       for (const workspace of this.state.workspaces) {
@@ -128,7 +128,7 @@ export class WorkspaceStore {
         // Canvas archiving is persistent UI state. A normal DSH list refresh
         // must not recreate a session that the user deliberately archived.
         if (this.state.hiddenSessionIds.includes(item.id)) continue
-        const workspace = this.dshWorkspace(item.cwd, 'DSH 任务')
+        const workspace = this.dshWorkspace(item.cwd, 'DSH Tasks')
         const session = { id: item.id, header: { meta: { cwd: item.cwd }, parentSession: typeof item.parentId === 'string' ? item.parentId : undefined }, title: typeof item.title === 'string' ? item.title : undefined, events: [] }
         const thread = this.dshThread(workspace, session)
         if (typeof item.title === 'string' && item.title.trim() !== '') {
@@ -195,7 +195,7 @@ export class WorkspaceStore {
   }
 
   /** Replay one live DSH session into the dedicated projection workspace. */
-  async projectSession(session, replayFrom = 0, workspaceTitle = 'DSH 任务') {
+  async projectSession(session, replayFrom = 0, workspaceTitle = 'DSH Tasks') {
     return this.mutate(() => {
       if (this.state.hiddenSessionIds.includes(session.id)) return null
       const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
@@ -208,7 +208,7 @@ export class WorkspaceStore {
   }
 
   /** Project one committed DSH session event. Repeated sequence numbers are ignored. */
-  async projectEvent(session, event, workspaceTitle = 'DSH 任务') {
+  async projectEvent(session, event, workspaceTitle = 'DSH Tasks') {
     return this.mutate(() => {
       if (this.state.hiddenSessionIds.includes(session.id)) return null
       const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
@@ -219,7 +219,7 @@ export class WorkspaceStore {
   }
 
   /** Project a batch of committed events for one session in a single write. */
-  async projectEvents(session, events, workspaceTitle = 'DSH 任务') {
+  async projectEvents(session, events, workspaceTitle = 'DSH Tasks') {
     if (events.length === 0) return null
     return this.mutate(() => {
       if (this.state.hiddenSessionIds.includes(session.id)) return null
@@ -285,7 +285,7 @@ export class WorkspaceStore {
       this.lastKnownMtime = before
       if (!this.externalModWarned) {
         this.externalModWarned = true
-        process.stderr.write('synapse: workspaces.json 已被另一个 dsh web 实例修改，本实例的写入可能覆盖其更改——请只运行一个实例\n')
+        process.stderr.write('synapse: workspaces.json was modified by another dsh web instance; this instance may overwrite its changes — run only one instance\n')
       }
     }
     await this.acquireLock()
@@ -313,7 +313,7 @@ export class WorkspaceStore {
     }
     if (!this.lockWarned) {
       this.lockWarned = true
-      process.stderr.write('synapse: 另一个 dsh web 实例正在写入 workspaces.json——请只运行一个实例，否则画布数据可能互相覆盖\n')
+      process.stderr.write('synapse: another dsh web instance is writing workspaces.json — run only one instance, or canvas data may overwrite each other\n')
     }
   }
 
@@ -351,7 +351,7 @@ export class WorkspaceStore {
 
   workspace(workspaceId) {
     const workspace = this.state.workspaces.find(item => item.id === workspaceId)
-    if (workspace === undefined) throw new NotFoundError('工作空间不存在')
+    if (workspace === undefined) throw new NotFoundError('Workspace does not exist')
     return workspace
   }
 
@@ -360,7 +360,7 @@ export class WorkspaceStore {
       const thread = workspace.threads.find(item => item.id === threadId)
       if (thread !== undefined) return { workspace, thread }
     }
-    throw new NotFoundError('节点不存在')
+    throw new NotFoundError('Node does not exist')
   }
 
   dshWorkspace(cwd, fallbackTitle) {
@@ -392,7 +392,7 @@ export class WorkspaceStore {
     const now = new Date().toISOString()
     thread = {
       id: randomUUID(),
-      title: typeof session.title === 'string' && session.title.trim() !== '' ? session.title.slice(0, MAX_TITLE_LENGTH) : (parent === undefined ? 'DSH 会话' : `${parent.title} 分支`),
+      title: typeof session.title === 'string' && session.title.trim() !== '' ? session.title.slice(0, MAX_TITLE_LENGTH) : (parent === undefined ? 'DSH Session' : `${parent.title} Branch`),
       parentId: parent?.id ?? null,
       sourceParentSessionId: parentSessionId,
       sourceSeedLength: Number.isSafeInteger(session.header?.seedLength) && session.header.seedLength >= 0 ? session.header.seedLength : null,
@@ -481,7 +481,7 @@ export class WorkspaceStore {
       const outcome = contentText(data.message?.content)
       const error = errorText(data.error)
       if (entry === undefined) {
-        process.push({ callId, turn: data.turn, step: data.step, name: '工具调用', arguments: null, result: outcome, error })
+        process.push({ callId, turn: data.turn, step: data.step, name: 'Tool call', arguments: null, result: outcome, error })
       } else {
         entry.result = outcome
         entry.error = error
@@ -553,11 +553,11 @@ function normalizeState(value) {
         const workspaceNow = typeof workspace.updatedAt === 'string' ? workspace.updatedAt : now
         return {
           id: typeof workspace.id === 'string' ? workspace.id : randomUUID(),
-          title: typeof workspace.title === 'string' && workspace.title.trim() ? workspace.title : '未命名工作空间',
+          title: typeof workspace.title === 'string' && workspace.title.trim() ? workspace.title : 'Untitled workspace',
           createdAt: typeof workspace.createdAt === 'string' ? workspace.createdAt : workspaceNow,
           updatedAt: workspaceNow,
           threads: events.length === 0 ? [] : [{
-            id: randomUUID(), title: workspace.title || '历史记录', parentId: null, dshSessionId: null, dshSessionTitle: null,
+            id: randomUUID(), title: workspace.title || 'History', parentId: null, dshSessionId: null, dshSessionTitle: null,
             color: TOPIC_COLORS[index % TOPIC_COLORS.length], position: { x: 86, y: 82 }, createdAt: workspaceNow, updatedAt: workspaceNow,
             messages: events.map(event => ({ id: typeof event.id === 'string' ? event.id : randomUUID(), text: String(event.text ?? ''), at: typeof event.at === 'string' ? event.at : workspaceNow })),
           }],
@@ -608,13 +608,13 @@ function foldLegacyToolCards(workspaces) {
         }
         changed = true
         if (message.kind === 'tool') {
-          const [name = '工具调用', ...argumentLines] = message.text.split('\n')
+          const [name = 'Tool call', ...argumentLines] = message.text.split('\n')
           const entry = { callId: `legacy-${assistant.process.length}`, name, arguments: argumentLines.join('\n'), result: null, error: null }
           pending.push(entry)
           assistant.process.push(entry)
         } else {
           const entry = pending.shift() ?? (() => {
-            const orphan = { callId: `legacy-orphan-${assistant.process.length}`, name: '工具调用', arguments: null, result: null, error: null }
+            const orphan = { callId: `legacy-orphan-${assistant.process.length}`, name: 'Tool call', arguments: null, result: null, error: null }
             assistant.process.push(orphan)
             return orphan
           })()
@@ -630,15 +630,15 @@ function foldLegacyToolCards(workspaces) {
 function positionOf(value) {
   const x = Number(value?.x)
   const y = Number(value?.y)
-  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new InputError('position 必须包含有效坐标')
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new InputError('position must contain valid coordinates')
   return { x: Math.round(Math.max(-2000, Math.min(5000, x))), y: Math.round(Math.max(-2000, Math.min(5000, y))) }
 }
 
 function requiredText(value, maxLength, field) {
-  if (typeof value !== 'string') throw new InputError(`${field} 必须是文本`)
+  if (typeof value !== 'string') throw new InputError(`${field} must be text`)
   const text = value.trim()
-  if (text.length === 0) throw new InputError(`${field} 不能为空`)
-  if (text.length > maxLength) throw new InputError(`${field} 超过长度限制`)
+  if (text.length === 0) throw new InputError(`${field} cannot be empty`)
+  if (text.length > maxLength) throw new InputError(`${field} exceeds the length limit`)
   return text
 }
 
@@ -654,13 +654,13 @@ function projectableEvent(event) {
       return noteProjection('todo', Array.isArray(event.data?.todos) ? event.data.todos.map(todo => `[${todo.status}] ${todo.content}`).join('\n') : '')
     case 'turn/end': {
       const reason = event.data?.reason
-      if (reason?.kind === 'error') return noteProjection('error', errorText(reason.error) ?? '本轮执行失败')
-      if (reason?.kind === 'cancelled' || reason?.kind === 'canceled' || reason?.kind === 'aborted') return noteProjection('error', '本轮已取消')
+      if (reason?.kind === 'error') return noteProjection('error', errorText(reason.error) ?? 'This turn failed to execute')
+      if (reason?.kind === 'cancelled' || reason?.kind === 'canceled' || reason?.kind === 'aborted') return noteProjection('error', 'This turn was cancelled')
       return null
     }
     default:
       return /(?:error|failed|failure|cancel(?:led)?|abort)/i.test(event.type)
-        ? noteProjection('error', errorText(event.data?.error ?? event.data?.reason ?? event.data) ?? 'Harness 运行失败')
+        ? noteProjection('error', errorText(event.data?.error ?? event.data?.reason ?? event.data) ?? 'Harness run failed')
         : null
   }
 }
@@ -702,16 +702,16 @@ function contentText(content) {
 
 function titleFromText(text) {
   const line = text.replaceAll(/\s+/g, ' ').trim()
-  return (line.length > 42 ? `${line.slice(0, 42)}...` : line) || 'DSH 会话'
+  return (line.length > 42 ? `${line.slice(0, 42)}...` : line) || 'DSH Session'
 }
 
 function sessionCwd(session) {
   const cwd = session.header?.meta?.cwd ?? session.header?.cwd
-  return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : '未指定工作目录'
+  return typeof cwd === 'string' && cwd.trim() !== '' ? cwd : 'No working directory'
 }
 
 function workspaceTitle(cwd, fallbackTitle) {
-  if (cwd === '未指定工作目录') return fallbackTitle
+  if (cwd === 'No working directory') return fallbackTitle
   const segment = cwd.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1)
   return segment && segment.trim() !== '' ? segment : fallbackTitle
 }
@@ -721,10 +721,10 @@ async function readJson(req) {
   let length = 0
   for await (const chunk of req) {
     length += chunk.length
-    if (length > MAX_BODY_BYTES) throw new InputError('请求内容过大')
+    if (length > MAX_BODY_BYTES) throw new InputError('Request body too large')
     chunks.push(chunk)
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new InputError('请求不是有效 JSON') }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw new InputError('Request is not valid JSON') }
 }
 
 function sendJson(res, status, body) {
@@ -738,7 +738,7 @@ function sendFile(res, contentType, body) {
 }
 
 function page() {
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synapse for DSH</title><link rel="stylesheet" href="/synapse/styles.css"></head><body><div id="app"></div><script src="/synapse/app.js"></script></body></html>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synapse for DSH</title><link rel="stylesheet" href="/synapse/styles.css"></head><body><div id="app"></div><script src="/synapse/app.js"></script></body></html>`
 }
 
 /** Mount Synapse routes on the existing DSH Web Server. */
@@ -747,7 +747,7 @@ export function apply(ctx, config) {
   const autoProjection = config?.autoProjection !== false
   const projectionWorkspaceTitle = typeof config?.projectionWorkspaceTitle === 'string' && config.projectionWorkspaceTitle.trim() !== ''
     ? config.projectionWorkspaceTitle.trim().slice(0, MAX_TITLE_LENGTH)
-    : 'DSH 任务'
+    : 'DSH Tasks'
   const reportProjectionFailure = error => {
     ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
   }
@@ -792,7 +792,7 @@ export function apply(ctx, config) {
   const api = async (req, res) => {
     try {
       const hostname = (typeof req.headers.host === 'string' ? req.headers.host : '').replace(/:\d+$/, '').toLowerCase()
-      if (!trustedHosts.has(hostname)) return sendJson(res, 403, { error: '不被信任的 Host' })
+      if (!trustedHosts.has(hostname)) return sendJson(res, 403, { error: 'Untrusted Host' })
       const path = new URL(req.url ?? '/', 'http://dsh.local').pathname
       if (path === '/synapse/api/reset' && req.method === 'POST') return sendJson(res, 200, await store.clearLegacy(ctx.sessions.list()))
       if (path === '/synapse/api/workspaces') {
@@ -812,12 +812,12 @@ export function apply(ctx, config) {
       const thread = /^\/synapse\/api\/threads\/([0-9a-f-]+)$/i.exec(path)
       if (thread !== null && req.method === 'PATCH') return sendJson(res, 200, { thread: await store.updateThread(thread[1], await readJson(req)) })
       if (thread !== null && req.method === 'DELETE') return sendJson(res, 200, await store.removeThread(thread[1]))
-      return sendJson(res, 404, { error: '接口不存在' })
+      return sendJson(res, 404, { error: 'Endpoint does not exist' })
     } catch (error) {
       if (error instanceof InputError) return sendJson(res, 400, { error: error.message })
       if (error instanceof NotFoundError) return sendJson(res, 404, { error: error.message })
       ctx.logger.error(error instanceof Error ? error : new Error(String(error)))
-      return sendJson(res, 500, { error: 'Synapse 数据暂时不可用' })
+      return sendJson(res, 500, { error: 'Synapse data is temporarily unavailable' })
     }
   }
   ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/synapse', handler: (_req, res) => { res.writeHead(302, { location: '/synapse/' }); res.end() } }), 'synapse: redirect')
